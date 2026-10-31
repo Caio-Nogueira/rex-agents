@@ -14,6 +14,11 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 3 ✅ ✻ docs-site
     docs
     ⎇ feature/search-page ✓
+
+── usage ─────────────────
+✻ 5h ▰▰▰▰▱▱▱▱▱▱  42% 2h      ← plan limits, with time to reset
+  7d ▰▰▱▱▱▱▱▱▱▱  18% 4d
+  today 12.4M tok
 ```
 
 ## Features
@@ -26,6 +31,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session or tab.
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
+- **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
 
 Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code and Codex do this out of the box.
@@ -35,6 +41,7 @@ Agents appear when they report their status with Rex's [program status protocol]
 - Rex (beta) on macOS or Linux
 - Python 3 on the machine running the Rex server
 - `git`, for the branch line
+- `jq`, only for saving Claude Code's plan limits (see [Usage section](#usage-section))
 
 ## Install
 
@@ -106,6 +113,27 @@ In the switcher, `Esc` closes it.
 | `panel_columns` | `29` | Width of the panel, in columns. |
 | `rex_bin` | found automatically | Path to the `rex` binary, if it isn't found. |
 
+## Usage section
+
+Today's tokens need no setup: they're read incrementally from Claude Code's logs (`~/.claude/projects`) and Codex's sessions (`~/.codex/sessions`). Codex's plan limits come from its session files too.
+
+Claude Code hands its plan limits only to its status line command, so for the Claude bars, save them from there. Add this at the start of your `statusLine` command in `~/.claude/settings.json`, after it reads its input into `$input`:
+
+```sh
+d="${XDG_CACHE_HOME:-$HOME/.cache}/rex-agents"; mkdir -p "$d"; printf '%s' "$input" | jq -ce 'select(.rate_limits) | {rate_limits}' > "$d/claude-limits.json.tmp" && mv "$d/claude-limits.json.tmp" "$d/claude-limits.json";
+```
+
+If you have no status line yet, this one does only that:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "input=$(cat); d=\"${XDG_CACHE_HOME:-$HOME/.cache}/rex-agents\"; mkdir -p \"$d\"; printf '%s' \"$input\" | jq -ce 'select(.rate_limits) | {rate_limits}' > \"$d/claude-limits.json.tmp\" && mv \"$d/claude-limits.json.tmp\" \"$d/claude-limits.json\""
+}
+```
+
+Claude Code sends plan limits on subscription plans; a window shows once Claude has reported it. Until then the panel says "plan limits: see README".
+
 ## Recommended Rex settings
 
 - **Turn off Autobalance splits** (command palette: "Disable Autobalance Splits"). With it on, Rex briefly gives the new panel an equal share of the tab before the panel shrinks itself, which looks jumpy.
@@ -115,7 +143,7 @@ In the switcher, `Esc` closes it.
 
 - `lua/rex-agents/init.lua` defines the two actions.
 - Turning the panel on starts `lua/rex-agents/collect.lua` with `rex do --all`. It adds a panel to every tab (and to tabs created later), listens for status, title, process and layout events, and writes the agent list to `$XDG_CACHE_HOME/rex-agents/state.json` (default `~/.cache`). It exits once the last panel closes.
-- Each panel runs `bin/rex-agents`, which redraws whenever that file changes.
+- Each panel runs `bin/rex-agents`, which redraws whenever that file changes. Every 30 seconds one panel (whichever takes the lock) rereads usage into `usage.json` beside it.
 
 ## Limitations
 

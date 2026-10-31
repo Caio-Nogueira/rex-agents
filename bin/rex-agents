@@ -13,6 +13,9 @@ Keys: 1-9 jump to that agent, j/k or up/down move, enter jump, q quit.
 agents waiting on you (passed in by the agents_waiting action), which closes
 once you pick one.
 """
+import calendar
+import fcntl
+import glob
 import json
 import os
 import select
@@ -121,11 +124,15 @@ def rex(*args):
         return None
 
 
-def state_mtime():
+def mtime_of(path):
     try:
-        return os.stat(STATE).st_mtime_ns
+        return os.stat(path).st_mtime_ns
     except OSError:
         return None
+
+
+def state_mtime():
+    return mtime_of(STATE)
 
 
 def read_state():
@@ -245,6 +252,193 @@ def branch_line(info, width):
     return f"    {HINT}⎇\x1b[0m {DETAIL}{branch}\x1b[0m {' '.join(state)}"
 
 
+# --- Usage -------------------------------------------------------------------
+#
+# Plan limits and today's tokens, read from what the agents keep on disk (the
+# same sources as https://github.com/trishtzy/ai-usage). Every 30 seconds one
+# panel, whichever takes the lock, rereads them into USAGE; the rest just read
+# that file. Logs are read incrementally, from where the last read stopped.
+
+USAGE_TTL = 30
+USAGE = os.path.join(os.path.dirname(STATE), "usage.json")
+USAGE_CACHE = os.path.join(os.path.dirname(STATE), "usage-cache.json")
+USAGE_LOCK = os.path.join(os.path.dirname(STATE), "usage.lock")
+# Claude Code hands its plan limits only to its status line command; see the
+# README for the line that saves them here.
+CLAUDE_LIMITS = os.path.join(os.path.dirname(STATE), "claude-limits.json")
+CLAUDE_LOGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
+CODEX_SESSIONS = os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "sessions")
+
+
+def local_day(timestamp):
+    """The local date of an ISO timestamp such as 2026-10-31T02:37:01.441Z."""
+    try:
+        utc = calendar.timegm(time.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S"))
+        return time.strftime("%Y-%m-%d", time.localtime(utc))
+    except (TypeError, ValueError):
+        return None
+
+
+def read_new_lines(path, files):
+    """Lines appended to path since the last read, tracked in files[path]."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    seen = files.get(path, {})
+    offset = seen.get("offset", 0) if seen.get("inode") == st.st_ino and seen.get("offset", 0) <= st.st_size else 0
+    if offset == st.st_size:
+        return []
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+    end = data.rfind(b"\n") + 1  # leave a half-written last line for next time
+    files[path] = {"inode": st.st_ino, "offset": offset + end}
+    return data[:end].decode("utf-8", "ignore").splitlines()
+
+
+def refresh_usage():
+    """Reread today's usage into USAGE, if it's stale and no other panel is."""
+    try:
+        if time.time() - os.stat(USAGE).st_mtime < USAGE_TTL:
+            return
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(USAGE), exist_ok=True)
+    with open(USAGE_LOCK, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another panel is on it
+        today = time.strftime("%Y-%m-%d")
+        try:
+            with open(USAGE_CACHE, encoding="utf-8") as f:
+                cache = json.load(f)
+        except (OSError, ValueError):
+            cache = {}
+        if cache.get("day") != today:
+            cache = {"day": today, "files": {}, "seen": [], "claude": 0, "codex": 0, "codex_limits": None}
+        seen = set(cache["seen"])
+
+        midnight = time.mktime(time.strptime(today, "%Y-%m-%d"))
+        for path in glob.glob(os.path.join(CLAUDE_LOGS, "*", "*.jsonl")):
+            try:
+                if os.path.getmtime(path) < midnight:
+                    continue
+            except OSError:
+                continue
+            for line in read_new_lines(path, cache["files"]):
+                if '"usage"' not in line or '"assistant"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") or {}
+                usage = message.get("usage") or {}
+                key = f"{message.get('id')}:{entry.get('requestId')}"
+                if not usage or key in seen or local_day(entry.get("timestamp")) != today:
+                    continue
+                seen.add(key)  # Claude logs a response once per content block
+                cache["claude"] += sum(usage.get(k) or 0 for k in (
+                    "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+
+        for path in glob.glob(os.path.join(CODEX_SESSIONS, *time.strftime("%Y/%m/%d").split("/"), "*.jsonl")):
+            for line in read_new_lines(path, cache["files"]):
+                if '"token_count"' not in line:
+                    continue
+                try:
+                    payload = json.loads(line).get("payload") or {}
+                except ValueError:
+                    continue
+                last = (payload.get("info") or {}).get("last_token_usage") or {}
+                cache["codex"] += last.get("total_tokens") or 0
+                if payload.get("rate_limits"):
+                    cache["codex_limits"] = payload["rate_limits"]
+
+        cache["seen"] = sorted(seen)
+        tmp = USAGE_CACHE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        os.replace(tmp, USAGE_CACHE)
+
+        now = time.time()
+        providers = []
+        claude_limits = []
+        try:
+            with open(CLAUDE_LIMITS, encoding="utf-8") as f:
+                limits = json.load(f).get("rate_limits") or {}
+            for label, name in (("5h", "five_hour"), ("7d", "seven_day")):
+                w = limits.get(name) or {}
+                if (w.get("resets_at") or 0) > now:
+                    claude_limits.append({"label": label, "pct": w.get("used_percentage", 0), "resets_at": w["resets_at"]})
+        except (OSError, ValueError, AttributeError):
+            claude_limits = None  # not set up
+        providers.append({"app": "claude-code", "limits": claude_limits, "tokens": cache["claude"]})
+
+        codex_limits = []
+        for w in ((cache.get("codex_limits") or {}).get("primary"), (cache.get("codex_limits") or {}).get("secondary")):
+            if w and (w.get("resets_at") or 0) > now:
+                label = "5h" if w.get("window_minutes") == 300 else "7d" if w.get("window_minutes") == 10080 else f"{w.get('window_minutes')}m"
+                codex_limits.append({"label": label, "pct": w.get("used_percent", 0), "resets_at": w["resets_at"]})
+        if cache["codex"] or codex_limits:
+            providers.append({"app": "codex", "limits": codex_limits, "tokens": cache["codex"]})
+
+        tmp = USAGE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"providers": providers}, f)
+        os.replace(tmp, USAGE)
+
+
+def read_usage():
+    try:
+        with open(USAGE, encoding="utf-8") as f:
+            return json.load(f).get("providers") or []
+    except (OSError, ValueError):
+        return []
+
+
+def short_count(n):
+    for unit, size in (("B", 1e9), ("M", 1e6), ("k", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return str(int(n))
+
+
+def short_wait(seconds):
+    """Time until a reset, such as 2h or 3d."""
+    if seconds >= 86400:
+        return f"{int(seconds // 86400)}d"
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    return f"{max(int(seconds // 60), 1)}m"
+
+
+def usage_lines(width):
+    """The usage section: a bar per plan limit, then today's tokens."""
+    providers = read_usage()
+    if not providers:
+        return []
+    out = [f"{HINT}{'── usage ' + '─' * max(width - 10, 0)}\x1b[0m"]
+    now = time.time()
+    bar_width = max(min(width - 16, 10), 4)  # "✻ 5h " + bar + " 100% 23h"
+    for p in providers:
+        icon = agent_icon(p["app"])
+        limits = p.get("limits")
+        if limits is None:
+            out.append(f"{icon} {DETAIL}plan limits: see README\x1b[0m")
+        for i, limit in enumerate(limits or []):
+            pct = max(0.0, min(float(limit["pct"]), 100.0))
+            filled = round(pct / 100 * bar_width)
+            colour = "\x1b[92m" if pct < 50 else "\x1b[93m" if pct < 80 else "\x1b[91m"
+            bar = f"{colour}{'▰' * filled}{HINT}{'▱' * (bar_width - filled)}\x1b[0m"
+            lead = icon if i == 0 else " "
+            out.append(f"{lead} {DETAIL}{limit['label']}\x1b[0m {bar} {NAME}{pct:3.0f}%\x1b[0m "
+                       f"{HINT}{short_wait(limit['resets_at'] - now)}\x1b[0m")
+        out.append(f"{icon if not limits else ' '} {DETAIL}today {short_count(p.get('tokens') or 0)} tok\x1b[0m")
+    return out
+
+
 def fit(text, width):
     """Keep the end of text, which for paths is the part that tells them apart."""
     if width <= 0:
@@ -298,6 +492,12 @@ def render(rows, cursor):
         info = git_info(row["cwd"])
         if info:
             out.append(branch_line(info, width))
+    usage = usage_lines(width)
+    if usage:
+        # Sit at the bottom of the panel when there's room, else just below.
+        height = os.get_terminal_size().lines if sized else 0
+        out.extend([""] * max(height - len(out) - len(usage), 1))
+        out.extend(usage)
     set_title(rows)
     sys.stdout.write("\n".join(out))
     sys.stdout.flush()
@@ -319,7 +519,7 @@ def main():
     tty.setcbreak(fd)
     sys.stdout.write("\x1b[?25l\x1b[H\x1b[2J")
     sys.stdout.flush()
-    rows, cursor, seen, last_render = None, 0, None, 0.0
+    rows, cursor, seen, last_render, usage_seen = None, 0, None, 0.0, None
 
     def on_resize(*_):
         global sized
@@ -363,6 +563,13 @@ def main():
             elif time.monotonic() - last_render >= GIT_TTL:
                 render(rows, cursor)  # pick up branch changes
                 last_render = time.monotonic()
+            # Its own clock: the agent list can change too often for the
+            # branch above to come round. A stat, unless USAGE_TTL is up.
+            refresh_usage()
+            usage_mtime = mtime_of(USAGE)
+            if usage_mtime != usage_seen:
+                usage_seen = usage_mtime
+                render(rows, cursor)
             ready, _, _ = select.select([fd], [], [], 0.5)
             if ready:
                 key = read_key(fd)
