@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""Herdr-style agent list for Rex: one row per pane that reports program status.
+
+Part of rex-agents (https://github.com/irfn/rex-agents).
+
+Rows come from collect.lua, one long-running `rex do` script shared by every
+panel, which rewrites STATE whenever an agent's status changes. This process
+only watches that file, so a panel in every tab costs next to nothing.
+
+Keys: 1-9 jump to that agent, j/k or up/down move, enter jump, q quit.
+
+`rex-agents --pick JSON` is the Cmd+E switcher instead: a short list of the
+agents waiting on you (passed in by the agents_waiting action), which closes
+once you pick one.
+"""
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+
+def option(name, default):
+    """The value after --name on the command line, which the collector passes."""
+    args = sys.argv[1:]
+    return args[args.index(name) + 1] if name in args[:-1] else default
+
+
+# Where the collector writes the agent list, and the panel's width (the
+# plugin's panel_columns option).
+STATE = option("--state", os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                                       "rex-agents", "state.json"))
+PANEL_COLUMNS = int(option("--columns", "29"))
+SELF_BLOCK = os.environ.get("REX_BLOCK")
+SELF_SESSION = os.environ.get("REX_SESSION")
+HOME = os.path.expanduser("~")
+# Until the app sends this pane's real size (it only does for tabs on screen),
+# the terminal reports a placeholder 80 columns. Draw at the expected width
+# meanwhile, so nothing reflows once the real size arrives.
+EXPECTED_COLUMNS = PANEL_COLUMNS - 2  # borders and padding take the rest
+sized = False
+
+# Lower sorts first: what needs you goes to the top.
+ORDER = {"blocked": 0, "error": 1, "done": 2, "working": 3, "idle": 4}
+# Emoji draw in their own colours, which survive the fade Rex applies to this
+# (rarely focused) pane. Every one is two columns wide.
+ICON = {"blocked": "🔴", "error": "❌", "done": "✅", "working": "⏳", "idle": "💤"}
+UNKNOWN_ICON = "❔"
+AGENT_ICON = {"claude-code": "\x1b[38;5;173m✻\x1b[0m", "codex": "\x1b[37m⬡\x1b[0m",
+              "opencode": "\x1b[37m⌬\x1b[0m", "pi": "\x1b[35mπ\x1b[0m"}
+
+# An agent waiting on you gets a full-width amber bar, and its reason in amber.
+# The panel is rarely focused, so Rex fades it like any unfocused pane. Solid
+# background bars survive that fade far better than coloured text, so the
+# rows that matter are bars, and nothing uses the faint attribute (which the
+# fade would dim a second time).
+WAITING_BAR = "\x1b[1;38;5;232;48;5;220m"  # bold black on bright gold
+WAITING_BAR_SELECTED = "\x1b[1;38;5;232;48;5;208m"  # orange: waiting and selected
+SELECTED_BAR = "\x1b[1;38;5;232;48;5;153m"  # bold black on light blue
+WAITING_TEXT = "\x1b[1;38;5;220m"
+NAME = "\x1b[1;97m"  # bold bright white
+DETAIL = "\x1b[38;5;250m"  # light grey, readable when faded
+HINT = "\x1b[38;5;245m"
+HERE = "\x1b[1;96m"  # bold bright cyan ▶ on the agent in the focused pane
+WAITING_DOT = ICON["blocked"]
+WAITING_LABEL = {"permission": "needs approval", "question": "has a question", "auth": "needs a login"}
+
+
+def agent_name(row):
+    """The agent's conversation name from its terminal title (Claude's /rename
+    sets it), or the Rex session name when the title is just the program."""
+    title = (row.get("title") or "").strip()
+    if not title or title.lower().replace(" ", "-") in (row["app"], "claude-code", "codex", "opencode", "pi"):
+        return row["session"]
+    return title
+
+
+def agent_icon(app):
+    return AGENT_ICON.get(app) or (app[:1].upper() if app else "?")
+
+
+def plain(text):
+    """text without its colour codes, for drawing inside a coloured bar."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\x1b":
+            i = text.index("m", i) + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+_title = None
+
+
+def set_title(rows):
+    """Put the number of agents waiting on you in the pane's title."""
+    global _title
+    waiting = sum(1 for r in rows or [] if r["state"] == "blocked")
+    title = f"Agents · {waiting} waiting" if waiting else "Agents"
+    if title != _title:
+        sys.stdout.write(f"\x1b]2;{title}\x07")
+        _title = title
+
+
+def rex(*args):
+    try:
+        out = subprocess.run(["rex", *args], capture_output=True, text=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def state_mtime():
+    try:
+        return os.stat(STATE).st_mtime_ns
+    except OSError:
+        return None
+
+
+def read_state():
+    """The collector's rows, sorted, or None if there are none to read yet.
+
+    Each row's "here" is set when it's the agent in the focused pane of the tab
+    this panel is in, which is the tab you're looking at when you see it.
+    """
+    try:
+        with open(STATE, encoding="utf-8") as f:
+            state = json.load(f)
+        rows = state["agents"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    my_window = (state.get("panels") or {}).get(SELF_BLOCK)
+    for row in rows:
+        row["here"] = bool(row.get("focused")) and row["window_id"] == my_window
+        row["msg"] = row.get("msg") or ""  # Rex has already decoded it
+        row["cwd"] = (row.get("cwd") or "").replace(HOME, "~")
+    rows.sort(key=lambda r: (ORDER.get(r["state"], 9), agent_name(r), r["updated"]))
+    return rows
+
+
+def fit_width():
+    """Size this pane to PANEL_COLUMNS when it sits on the right edge of its tab."""
+    if not (SELF_BLOCK and SELF_SESSION):
+        return
+    view = rex("session", "inspect", SELF_SESSION, "--json") or {}
+    for window in view.get("windows", []):
+        for layer in window.get("layers", []):
+            split = (layer.get("layout") or {}).get("split") or {}
+            if layer.get("kind") != "tiled" or (split.get("after") or {}).get("block_id") != SELF_BLOCK:
+                continue
+            # Measure the tab from a neighbouring pane: this pane's own size is
+            # still a placeholder this soon after it was created.
+            node = split["before"]
+            while "split" in node:
+                node = node["split"]["before"]
+            size = rex("block", "call", "-s", SELF_SESSION, "-b", node["block_id"], "size") or {}
+            share = (node.get("rect") or [0, 0, 0])[2]
+            if not (size.get("columns") and share):
+                return
+            total = size["columns"] / share  # the whole tab, in columns
+            ratio = 1 - PANEL_COLUMNS / total
+            # The collector usually got it right already; only fix a real miss.
+            if total > PANEL_COLUMNS and abs(ratio - split.get("ratio", 0.5)) * total >= 1:
+                args = {"direction": "horizontal", "before_block_id": node["block_id"],
+                        "after_block_id": SELF_BLOCK, "ratio": ratio}
+                rex("api", "call", "-s", SELF_SESSION, "session.resize_pane", json.dumps(args))
+            return
+
+
+def app_client():
+    for client in (rex("client", "ls", "--json") or {}).get("clients", []):
+        if (client.get("info") or {}).get("kind") == "app":
+            return client["client_id"]
+    return None
+
+
+def jump(row):
+    client = os.environ.get("REX_CLIENT") or app_client()
+    if client:
+        subprocess.run(["rex", "-C", client, "do", "session.select",
+                        f"session_id={row['session_id']}", f"window_id={row['window_id']}"],
+                       capture_output=True)
+    subprocess.run(["rex", "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
+
+
+GIT_TTL = 5  # seconds before a repo's branch state is read again
+_git_cache = {}
+
+
+def git_info(cwd):
+    """Branch name and state for cwd, or None outside a repo. Cached briefly."""
+    if not cwd:
+        return None
+    now = time.monotonic()
+    hit = _git_cache.get(cwd)
+    if hit and now - hit[0] < GIT_TTL:
+        return hit[1]
+    info = None
+    try:
+        out = subprocess.run(["git", "-C", os.path.expanduser(cwd), "status", "--porcelain=v2", "--branch"],
+                             capture_output=True, text=True, timeout=2)
+        if out.returncode == 0:
+            info = {"branch": "?", "ahead": 0, "behind": 0, "changed": 0}
+            for line in out.stdout.splitlines():
+                if line.startswith("# branch.head "):
+                    info["branch"] = line[len("# branch.head "):]
+                elif line.startswith("# branch.ab "):
+                    ahead, behind = line[len("# branch.ab "):].split()
+                    info["ahead"], info["behind"] = int(ahead), -int(behind)
+                elif not line.startswith("#"):
+                    info["changed"] += 1
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    _git_cache[cwd] = (now, info)
+    return info
+
+
+def branch_line(info, width):
+    state = []
+    if info["changed"]:
+        state.append(f"\x1b[93m●{info['changed']}\x1b[0m")
+    if info["ahead"]:
+        state.append(f"\x1b[96m↑{info['ahead']}\x1b[0m")
+    if info["behind"]:
+        state.append(f"\x1b[95m↓{info['behind']}\x1b[0m")
+    if not state:
+        state.append("\x1b[92m✓\x1b[0m")
+    # Visible width of the state part: each item is a symbol plus its digits.
+    state_width = sum(len(s) - 9 for s in state) + len(state)
+    room = width - 6 - state_width  # "    ⎇ " prefix
+    branch = info["branch"]
+    if len(branch) > room:
+        branch = branch[: max(room - 1, 0)] + "…"
+    return f"    {HINT}⎇\x1b[0m {DETAIL}{branch}\x1b[0m {' '.join(state)}"
+
+
+def fit(text, width):
+    """Keep the end of text, which for paths is the part that tells them apart."""
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else "…" + text[-(width - 1):]
+
+
+def render(rows, cursor):
+    width = os.get_terminal_size().columns
+    if not sized:
+        width = min(width, EXPECTED_COLUMNS)
+    # The pane's own title says "Agents", so the first line is only the keys.
+    waiting = sum(1 for r in rows or [] if r["state"] == "blocked")
+    if waiting:
+        # Lead with the count; the shorter hint still fits beside it.
+        badge = f"{WAITING_BAR} {WAITING_DOT} {waiting} waiting \x1b[0m"
+        hint = f"{HINT} ↑↓ · q\x1b[0m" if width >= 22 else ""
+        header = badge + hint
+    else:
+        header = f"{HINT} 1-9 jump · ↑↓ · q\x1b[0m" if width >= 20 else ""
+    out = ["\x1b[H\x1b[2J" + header, ""]
+    if rows is None:
+        out.append(f"{DETAIL}  loading…\x1b[0m")
+    elif not rows:
+        out.append(f"{DETAIL}  no agents reporting status\x1b[0m")
+    for i, row in enumerate(rows or []):
+        selected = i == cursor
+        waiting = row["state"] == "blocked"
+        # ▶ marks the agent you're in; you don't need a number to jump there.
+        key = "▶" if row["here"] else str(i + 1) if i < 9 else " "
+        icon = ICON.get(row["state"], UNKNOWN_ICON)
+        name = agent_name(row)[: max(width - 7, 0)]  # "1 ⏳ ✻ " is 7 columns
+        if waiting or selected:
+            # A solid bar the width of the panel (one less, for the wide emoji).
+            line = f"{key} {icon} {plain(agent_icon(row['app']))} {name}".ljust(width - 1)
+            bar = (WAITING_BAR_SELECTED if selected else WAITING_BAR) if waiting else SELECTED_BAR
+            out.append(f"{bar}{line}\x1b[0m")
+        else:
+            key = f"{HERE}{key}\x1b[0m" if row["here"] else key
+            out.append(f"{key} {icon} {agent_icon(row['app'])} {NAME}{name}\x1b[0m")
+        if waiting:
+            reason = WAITING_LABEL.get(row.get("kind"), "needs input")
+            if row["msg"]:
+                reason = f"{reason}: {row['msg']}"
+            out.append(f"{WAITING_TEXT}    {reason[: max(width - 4, 0)]}\x1b[0m")
+        elif row["msg"]:
+            out.append(f"{DETAIL}    {row['msg'][: max(width - 4, 0)]}\x1b[0m")
+        elif row["cwd"]:
+            leaf = os.path.basename(row["cwd"].rstrip("/")) or row["cwd"]
+            out.append(f"{DETAIL}    {fit(leaf, width - 4)}\x1b[0m")
+        info = git_info(row["cwd"])
+        if info:
+            out.append(branch_line(info, width))
+    set_title(rows)
+    sys.stdout.write("\n".join(out))
+    sys.stdout.flush()
+
+
+# Arrow keys arrive as escape sequences, in either cursor-key mode.
+ARROWS = {"\x1b[A": "k", "\x1bOA": "k", "\x1b[B": "j", "\x1bOB": "j"}
+
+
+def read_key(fd):
+    """One keypress, with up/down arrows mapped to k/j."""
+    key = os.read(fd, 8).decode(errors="ignore")  # a whole escape sequence arrives at once
+    return ARROWS.get(key, key[:1])
+
+
+def main():
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\x1b[?25l\x1b[H\x1b[2J")
+    sys.stdout.flush()
+    rows, cursor, seen, last_render = None, 0, None, 0.0
+
+    def on_resize(*_):
+        global sized
+        sized = True
+        render(rows, cursor)
+
+    signal.signal(signal.SIGWINCH, on_resize)
+    # Draw straight away (at EXPECTED_COLUMNS until the real size arrives),
+    # then check the width, which takes a few rex calls.
+    rows = read_state()
+    seen = state_mtime()
+    here = None  # block of the agent in the focused pane, last time we looked
+
+    def follow_focus():
+        """Move the selection to the focused agent when focus has moved, and
+        otherwise keep it on the same agent as rows are re-sorted."""
+        nonlocal cursor, here
+        now_here = next((r["block_id"] for r in rows or [] if r["here"]), None)
+        target = now_here if now_here and now_here != here else selected_block
+        here = now_here
+        cursor = next((i for i, r in enumerate(rows or []) if r["block_id"] == target),
+                      min(cursor, max(len(rows or []) - 1, 0)))
+
+    selected_block = None
+    follow_focus()
+    render(rows, cursor)
+    last_render = time.monotonic()
+    fit_width()
+    try:
+        while True:
+            mtime = state_mtime()
+            if mtime != seen:
+                seen = mtime
+                parsed = read_state()
+                if parsed is not None:
+                    selected_block = rows[cursor]["block_id"] if rows else None
+                    rows = parsed
+                    follow_focus()
+                    render(rows, cursor)
+                    last_render = time.monotonic()
+            elif time.monotonic() - last_render >= GIT_TTL:
+                render(rows, cursor)  # pick up branch changes
+                last_render = time.monotonic()
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if ready:
+                key = read_key(fd)
+                if key == "q":
+                    return
+                if not rows:
+                    continue
+                if key in ("j", "k"):
+                    cursor = (cursor + (1 if key == "j" else -1)) % len(rows)
+                    render(rows, cursor)
+                elif key in ("\r", "\n"):
+                    jump(rows[cursor])
+                elif key.isdigit() and 0 < int(key) <= len(rows):
+                    cursor = int(key) - 1
+                    jump(rows[cursor])
+                    render(rows, cursor)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\x1b[?25h\x1b[0m\n")
+
+
+def pick(rows):
+    """The switcher: jump to one of rows, then exit (which closes its pane)."""
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\x1b]2;Waiting for you\x07\x1b[?25l")
+    cursor = 0
+
+    def draw():
+        width = os.get_terminal_size().columns
+        out = ["\x1b[H\x1b[2J"]
+        if not rows:
+            out.append(f"{DETAIL}  No agents are waiting for you.\x1b[0m")
+        else:
+            out.append(f"{HINT} 1-9 jump · ↑↓ enter · esc\x1b[0m")
+            out.append("")
+        for i, row in enumerate(rows):
+            key = str(i + 1) if i < 9 else " "
+            name = agent_name(row)[: max(width - 7, 0)]  # WAITING_DOT takes two columns
+            line = f"{key} {WAITING_DOT} {plain(agent_icon(row['app']))} {name}".ljust(width - 1)
+            out.append(f"{WAITING_BAR_SELECTED if i == cursor else WAITING_BAR}{line}\x1b[0m")
+            reason = WAITING_LABEL.get(row.get("kind"), "needs input")
+            if row.get("msg"):
+                reason = f"{reason}: {row['msg']}"
+            out.append(f"{WAITING_TEXT}    {reason[: max(width - 4, 0)]}\x1b[0m")
+        sys.stdout.write("\n".join(out))
+        sys.stdout.flush()
+
+    signal.signal(signal.SIGWINCH, lambda *_: draw())
+    draw()
+    try:
+        if not rows:
+            # Nothing to pick: say so briefly, then get out of the way.
+            select.select([fd], [], [], 1.5)
+            return
+        while True:
+            key = read_key(fd)
+            if key in ("q", "\x1b"):
+                return
+            if key in ("j", "k"):
+                cursor = (cursor + (1 if key == "j" else -1)) % len(rows)
+                draw()
+            elif key in ("\r", "\n"):
+                jump(rows[cursor])
+                return
+            elif key.isdigit() and 0 < int(key) <= len(rows):
+                jump(rows[int(key) - 1])
+                return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) >= 3 and sys.argv[1] == "--pick":
+            pick(json.loads(sys.argv[2]))
+        else:
+            main()
+    except KeyboardInterrupt:
+        pass
