@@ -15,6 +15,12 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
     docs
     ⎇ feature/search-page ✓
 
+── ⇄ studio ──────────────   ← a remote host
+4 ⏳ ✻ data-pipeline
+    etl
+5 ▫ data-pipeline            ← its sessions
+6 ▫ scratch
+
 ── usage ─────────────────
 ✻ 5h ▰▰▰▰▱▱▱▱▱▱  42% 2h      ← plan limits, with time to reset
   7d ▰▰▱▱▱▱▱▱▱▱  18% 4d
@@ -30,7 +36,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Git branch and state** for each agent's directory: changed files `●N`, ahead `↑N`, behind `↓N`, or `✓` when clean.
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session or tab.
-- **Remote hosts too:** agents on your other Rex servers (`rex hosts`) are listed, marked `⇄ host`, and jumping to one opens that host's session. Another key opens a new session on a remote host.
+- **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host.
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.

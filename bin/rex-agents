@@ -68,6 +68,7 @@ WAITING_TEXT = "\x1b[1;38;5;220m"
 NAME = "\x1b[1;97m"  # bold bright white
 DETAIL = "\x1b[38;5;250m"  # light grey, readable when faded
 HINT = "\x1b[38;5;245m"
+DIVIDER = HINT  # the lines between this machine's agents and each remote host's
 HERE = "\x1b[1;96m"  # bold bright cyan ▶ on the agent in the focused pane
 WAITING_DOT = ICON["blocked"]
 WAITING_LABEL = {"permission": "needs approval", "question": "has a question", "auth": "needs a login"}
@@ -108,7 +109,7 @@ _title = None
 def set_title(rows):
     """Put the number of agents waiting on you in the pane's title."""
     global _title
-    waiting = sum(1 for r in rows or [] if r["state"] == "blocked")
+    waiting = sum(1 for r in rows or [] if r.get("state") == "blocked")
     title = f"Agents · {waiting} waiting" if waiting else "Agents"
     if title != _title:
         sys.stdout.write(f"\x1b]2;{title}\x07")
@@ -139,26 +140,42 @@ def state_mtime():
     return mtime_of(STATE)
 
 
-def read_state():
-    """The collector's rows, sorted, or None if there are none to read yet.
+hosts = []  # remote hosts from the last read: label, reachable
 
-    Each row's "here" is set when it's the agent in the focused pane of the tab
-    this panel is in, which is the tab you're looking at when you see it.
+
+def read_state():
+    """The rows to show, in order, or None if there are none to read yet: this
+    server's agents, then for each remote host its agents and its sessions.
+    A session row has "type": "session"; an agent row has none.
+
+    Each agent row's "here" is set when it's the agent in the focused pane of
+    the tab this panel is in, which is the tab you're looking at when you see it.
     """
+    global hosts
     try:
         with open(STATE, encoding="utf-8") as f:
             state = json.load(f)
-        rows = state["agents"]
+        agents = state["agents"]
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return None
+    hosts = state.get("hosts") or []
     my_window = (state.get("panels") or {}).get(SELF_BLOCK)
-    for row in rows:
+    for row in agents:
         row["here"] = bool(row.get("focused")) and row["window_id"] == my_window
         row["msg"] = row.get("msg") or ""  # Rex has already decoded it
         if not row.get("server"):  # a remote host's home is its own
             row["cwd"] = (row.get("cwd") or "").replace(HOME, "~")
-    rows.sort(key=lambda r: (ORDER.get(r["state"], 9), agent_name(r), r["updated"]))
+    agents.sort(key=lambda r: (ORDER.get(r["state"], 9), agent_name(r), r["updated"]))
+    rows = [r for r in agents if not r.get("server")]
+    for host in hosts:
+        rows += [r for r in agents if r.get("server") == host["label"]]
+        for session in sorted(host.get("sessions") or [], key=lambda r: r["session"]):
+            rows.append(dict(session, type="session", here=False))
     return rows
+
+
+def row_key(row):
+    return row.get("block_id") or row["session_id"]
 
 
 def fit_width():
@@ -201,14 +218,17 @@ def jump(row):
     # The app shows every host's sessions, so it selects a remote one by its ID too.
     client = os.environ.get("REX_CLIENT") or app_client()
     if client:
-        subprocess.run(["rex", "-C", client, "do", "session.select",
-                        f"session_id={row['session_id']}", f"window_id={row['window_id']}"],
-                       capture_output=True)
-    server = ["-S", row["server"]] if row.get("server") else []
-    subprocess.run(["rex", *server, "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
+        args = [f"session_id={row['session_id']}"]
+        if row.get("window_id"):
+            args.append(f"window_id={row['window_id']}")
+        subprocess.run(["rex", "-C", client, "do", "session.select", *args], capture_output=True)
+    if row.get("block_id"):
+        server = ["-S", row["server"]] if row.get("server") else []
+        subprocess.run(["rex", *server, "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
 
 
-HOST_ICON = "⇄"  # marks an agent on a remote host
+HOST_ICON = "⇄"  # marks a remote host's divider
+SESSION_ICON = "▫"  # a remote session
 
 GIT_TTL = 5  # seconds before a repo's branch state is read again
 _git_cache = {}
@@ -455,12 +475,26 @@ def fit(text, width):
     return text if len(text) <= width else "…" + text[-(width - 1):]
 
 
+def host_divider(label, width):
+    """The divider above a remote host's rows, saying when it can't be reached."""
+    if label is None:
+        return []
+    host = next((h for h in hosts if h["label"] == label), {})
+    title = f" {HOST_ICON} {label} "
+    lines = ["", f"{DIVIDER}──{fit(title, width - 4)}{'─' * max(width - 2 - len(title), 2)}\x1b[0m"]
+    if not host.get("reachable", True):
+        lines.append(f"{DETAIL}  unreachable\x1b[0m")
+    elif not host.get("sessions"):
+        lines.append(f"{DETAIL}  no sessions\x1b[0m")
+    return lines
+
+
 def render(rows, cursor):
     width = os.get_terminal_size().columns
     if not sized:
         width = min(width, EXPECTED_COLUMNS)
     # The pane's own title says "Agents", so the first line is only the keys.
-    waiting = sum(1 for r in rows or [] if r["state"] == "blocked")
+    waiting = sum(1 for r in rows or [] if r.get("state") == "blocked")
     if waiting:
         # Lead with the count; the shorter hint still fits beside it.
         badge = f"{WAITING_BAR} {WAITING_DOT} {waiting} waiting \x1b[0m"
@@ -471,13 +505,27 @@ def render(rows, cursor):
     out = ["\x1b[H\x1b[2J" + header, ""]
     if rows is None:
         out.append(f"{DETAIL}  loading…\x1b[0m")
-    elif not rows:
+    elif not any(not r.get("server") for r in rows):
         out.append(f"{DETAIL}  no agents reporting status\x1b[0m")
+    group = None  # the host whose rows are being drawn, None for this machine
+    drawn = set()
     for i, row in enumerate(rows or []):
+        if row.get("server") != group:
+            group = row.get("server")
+            drawn.add(group)
+            out.extend(host_divider(group, width))
         selected = i == cursor
+        key = str(i + 1) if i < 9 else " "
+        if row.get("type") == "session":
+            name = row["session"][: max(width - 4, 0)]  # "1 ▫ " is 4 columns
+            if selected:
+                out.append(f"{SELECTED_BAR}{f'{key} {SESSION_ICON} {name}'.ljust(width)}\x1b[0m")
+            else:
+                out.append(f"{key} {DETAIL}{SESSION_ICON}\x1b[0m {NAME}{name}\x1b[0m")
+            continue
         waiting = row["state"] == "blocked"
         # ▶ marks the agent you're in; you don't need a number to jump there.
-        key = "▶" if row["here"] else str(i + 1) if i < 9 else " "
+        key = "▶" if row["here"] else key
         icon = ICON.get(row["state"], UNKNOWN_ICON)
         name = agent_name(row)[: max(width - 7, 0)]  # "1 ⏳ ✻ " is 7 columns
         if waiting or selected:
@@ -498,13 +546,13 @@ def render(rows, cursor):
         elif row["cwd"]:
             leaf = os.path.basename(row["cwd"].rstrip("/")) or row["cwd"]
             out.append(f"{DETAIL}    {fit(leaf, width - 4)}\x1b[0m")
-        if row.get("server"):
-            # git can't see a remote host's files; name the host instead.
-            out.append(f"{DETAIL}    {fit(HOST_ICON + ' ' + row['server'], width - 4)}\x1b[0m")
-        else:
+        if not row.get("server"):  # git can't see a remote host's files
             info = git_info(row["cwd"])
             if info:
                 out.append(branch_line(info, width))
+    for host in hosts:  # hosts with nothing to list still get their divider
+        if host["label"] not in drawn:
+            out.extend(host_divider(host["label"], width))
     usage = usage_lines(width)
     if usage:
         # Sit at the bottom of the panel when there's room, else just below.
@@ -550,10 +598,10 @@ def main():
         """Move the selection to the focused agent when focus has moved, and
         otherwise keep it on the same agent as rows are re-sorted."""
         nonlocal cursor, here
-        now_here = next((r["block_id"] for r in rows or [] if r["here"]), None)
+        now_here = next((row_key(r) for r in rows or [] if r["here"]), None)
         target = now_here if now_here and now_here != here else selected_block
         here = now_here
-        cursor = next((i for i, r in enumerate(rows or []) if r["block_id"] == target),
+        cursor = next((i for i, r in enumerate(rows or []) if row_key(r) == target),
                       min(cursor, max(len(rows or []) - 1, 0)))
 
     selected_block = None
@@ -568,7 +616,7 @@ def main():
                 seen = mtime
                 parsed = read_state()
                 if parsed is not None:
-                    selected_block = rows[cursor]["block_id"] if rows else None
+                    selected_block = row_key(rows[cursor]) if rows else None
                     rows = parsed
                     follow_focus()
                     render(rows, cursor)

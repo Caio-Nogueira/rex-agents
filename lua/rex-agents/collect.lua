@@ -7,8 +7,9 @@
 -- STATE as JSON whenever something changes. bin/rex-agents, which runs in
 -- each of those panes, only reads that file.
 --
--- Agents on remote hosts (rex hosts) are listed too. Their events don't reach
--- this server, so each host is polled every REMOTE_EVERY seconds.
+-- Agents on remote hosts (rex hosts) are listed too, along with each host's
+-- sessions. Their events don't reach this server, so each host is polled
+-- every REMOTE_EVERY seconds.
 --
 -- Exits once the last agents pane is closed.
 
@@ -134,10 +135,20 @@ end
 
 -- Adds the agent rows of one server to rows, and for each agents pane the tab
 -- it sits in to panels, so each panel can mark the agent in its own tab's
--- focused pane. server is the remote host's label, nil here.
-local function scan(api, server, rows, panels)
+-- focused pane. server is the remote host's label, nil here. With session_rows,
+-- also adds a row per session there.
+local function scan(api, server, rows, panels, session_rows)
   for _, s in ipairs(sessions(api, server)) do
     local view = api.session.view{ session_id = s.session_id }
+    if session_rows and view then
+      session_rows[#session_rows + 1] = {
+        server     = server,
+        session_id = s.session_id,
+        window_id  = view.active_window_id,
+        session    = view.label or s.label or s.session_id,
+        windows    = #(view.windows or {}),
+      }
+    end
     for _, w in ipairs(view and view.windows or {}) do
       for _, layer in ipairs(w.layers) do
         for _, b in ipairs(layer.blocks) do
@@ -178,8 +189,9 @@ local function scan(api, server, rows, panels)
   end
 end
 
-local remote_rows = {} -- host label -> its rows from the last poll
-local retry_at = {}    -- host label -> when to try a host that failed again
+local remote_rows = {}     -- host label -> its agent rows from the last poll
+local remote_sessions = {} -- host label -> its session rows, or false when it didn't answer
+local retry_at = {}        -- host label -> when to try a host that failed again
 
 local function poll_remotes()
   local ok, labels = pcall(rex.servers)
@@ -187,36 +199,40 @@ local function poll_remotes()
   for _, label in ipairs(ok and labels or {}) do
     seen[label] = true
     if os.time() >= (retry_at[label] or 0) then
-      local rows = {}
-      local polled, err = pcall(scan, rex.server(label), label, rows, {})
+      local rows, session_rows = {}, {}
+      local polled, err = pcall(scan, rex.server(label), label, rows, {}, session_rows)
       if polled then
         retry_at[label] = nil
       else
         rex.log("warn", "rex-agents: " .. label .. ": " .. tostring(err))
-        rows, retry_at[label], attached[label] = {}, os.time() + REMOTE_RETRY, nil
+        rows, session_rows = {}, false
+        retry_at[label], attached[label] = os.time() + REMOTE_RETRY, nil
       end
-      remote_rows[label] = rows
+      remote_rows[label], remote_sessions[label] = rows, session_rows
       dirty = true
     end
   end
   for label in pairs(remote_rows) do
-    if not seen[label] then remote_rows[label] = nil end
+    if not seen[label] then remote_rows[label], remote_sessions[label] = nil, nil end
   end
 end
 
 local function snapshot()
-  local rows, panels = {}, {}
+  local rows, panels, hosts = {}, {}, {}
   scan(rex, nil, rows, panels)
-  for _, host_rows in pairs(remote_rows) do
+  for label, host_rows in pairs(remote_rows) do
     for _, row in ipairs(host_rows) do rows[#rows + 1] = row end
+    local session_rows = remote_sessions[label]
+    hosts[#hosts + 1] = { label = label, reachable = session_rows ~= false, sessions = session_rows or {} }
   end
-  return rows, panels
+  table.sort(hosts, function(a, b) return a.label < b.label end)
+  return rows, panels, hosts
 end
 
 local last_written
 
-local function write_state(rows, panels)
-  local json = rex.json.encode({ agents = rows, panels = panels })
+local function write_state(rows, panels, hosts)
+  local json = rex.json.encode({ agents = rows, panels = panels, hosts = hosts })
   if json == last_written then return end -- remote polls mostly change nothing
   local tmp = STATE .. ".tmp"
   local f = io.open(tmp, "w")
