@@ -62,6 +62,28 @@ local function rex_json(opts, argv)
   return rex.json.decode(run_rex(opts, argv))
 end
 
+local function has_session(list, session_id)
+  for _, s in ipairs(list and list.sessions or {}) do
+    if s.session_id == session_id then return true end
+  end
+  return false
+end
+
+-- The remote host an action was started from, or nil for this machine. A key
+-- pressed while the app shows a remote host's session runs the action here,
+-- but its rex.call and rex.session calls go to that host. So find the host by
+-- the session, through the CLI, which always starts on this machine.
+local function remote_host(opts, ctx)
+  local session_id = ctx and ctx.session_id
+  if not session_id or has_session(rex_json(opts, { "ls", "--json" }), session_id) then return nil end
+  for _, h in ipairs(rex_json(opts, { "hosts", "list", "--json" }).hosts or {}) do
+    local label = h.host.label
+    local ok, list = pcall(rex_json, opts, { "-S", label, "ls", "--json" })
+    if ok and has_session(list, session_id) then return label end
+  end
+  return type(ctx.server) == "string" and ctx.server ~= "" and ctx.server or nil
+end
+
 function M.setup(opts)
   opts = opts or {}
   local columns = opts.panel_columns or 29
@@ -71,6 +93,17 @@ function M.setup(opts)
     title       = "Toggle Agents Panel",
     description = "Show or hide the agent list on the right of every tab.",
     run         = function(ctx, args)
+      -- On a remote host's session, toggle that host's own panels, which
+      -- need rex-agents installed there.
+      local host = remote_host(opts, ctx)
+      if host then
+        local ok, err = pcall(run_rex, opts, { "-S", host, "do", "agents_panel" })
+        if not ok then
+          error(host .. ": " .. tostring(err) .. " (is rex-agents installed there? See the README's Remote hosts.)", 0)
+        end
+        return
+      end
+
       local panels = {}
       local list, err = rex.call("session.list")
       if err ~= nil then error(err, 0) end
@@ -108,13 +141,17 @@ function M.setup(opts)
     run         = function(ctx, args)
       local waiting = rex_json(opts, { "do", WAITING })
 
-      if #waiting == 1 then
+      -- The switcher is a pane on this machine, so on a remote host's session
+      -- it can't be shown: go to the first waiting agent instead.
+      local remote = remote_host(opts, ctx)
+      if remote and #waiting == 0 then return end
+      if #waiting == 1 or remote then
         local a = waiting[1]
-        if a.server then
-          run_rex(opts, { "-S", a.server, "focus", "-s", a.session_id, a.block_id })
-        else
-          rex.session.focus_block{ session_id = a.session_id, block_id = a.block_id }
-        end
+        -- Through the CLI, which reaches either machine whichever session
+        -- the action was started from.
+        local argv = a.server and { "-S", a.server } or {}
+        for _, v in ipairs({ "focus", "-s", a.session_id, a.block_id }) do argv[#argv + 1] = v end
+        run_rex(opts, argv)
         rex.client.queue("session.select", { session_id = a.session_id, window_id = a.window_id })
         return
       end

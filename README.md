@@ -149,6 +149,8 @@ rex do agents_panel
 
 That host's panel lists its own agents, and another machine's only if that machine is in its `rex hosts`.
 
+`panel_key` pressed while you're in a remote host's session toggles that host's panels, and `waiting_key` there goes to the first waiting agent, since the switcher can't be shown on another machine.
+
 **Seeing each machine from the other** means each one's Rex server has to be reachable from the other. With Tailscale:
 
 - In Rex for Mac, turn on Tailscale serving in Settings. The server gets its own tailnet name, such as `laptop-rex.<tailnet>.ts.net`.
