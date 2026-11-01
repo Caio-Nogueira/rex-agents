@@ -34,7 +34,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
 
-Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code and Codex do this out of the box. A pane running `claude`, `codex`, `opencode` or `pi` that has no status (Rex drops a finished agent's status once you've seen it) is listed as idle.
+Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code and Codex do this out of the box. A pane that runs `claude`, `codex`, `opencode` or `pi` but reports no status is still listed: Claude Code's state is read from its title (`✳` idle, a spinner while working), others show as idle. Such agents can't show as waiting.
 
 ## Requirements
 

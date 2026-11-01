@@ -145,7 +145,7 @@ local function snapshot()
             local app = root and (root.effective_app or root.app or "?") or agent_app(fg)
             if app then
               local title = method(s.session_id, b.block_id, "title")
-              root = root or { state = title_state(title and title.title) }
+              root = root or { state = app == "claude-code" and title_state(title and title.title) or "idle" }
               rows[#rows + 1] = {
                 session_id = s.session_id,
                 window_id  = w.window_id,
