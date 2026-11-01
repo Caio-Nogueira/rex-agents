@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 
@@ -224,11 +225,14 @@ def jump(row):
     if row.get("window_id"):
         args.append(f"window_id={row['window_id']}")
     clients = [os.environ["REX_CLIENT"]] if os.environ.get("REX_CLIENT") else app_clients()
-    for client in clients:
-        subprocess.run(["rex", "-C", client, "do", "session.select", *args], capture_output=True)
+    # All at once, without waiting: an app that isn't connected to the row's
+    # host takes seconds to fail, and the others shouldn't wait for it.
+    commands = [["rex", "-C", client, "do", "session.select", *args] for client in clients]
     if row.get("block_id"):
         server = ["-S", row["server"]] if row.get("server") else []
-        subprocess.run(["rex", *server, "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
+        commands.append(["rex", *server, "focus", "-s", row["session_id"], row["block_id"]])
+    procs = [subprocess.Popen(c, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for c in commands]
+    threading.Thread(target=lambda: [p.wait() for p in procs], daemon=True).start()
 
 
 HOST_ICON = "⇄"  # marks a remote host's divider
