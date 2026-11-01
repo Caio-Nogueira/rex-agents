@@ -115,6 +115,14 @@ local function agent_app(fg)
   end
 end
 
+-- Without a status record, guess from the title: Claude Code puts ✳ in front
+-- of it when idle and a spinner glyph while working.
+local function title_state(title)
+  local head = (title or ""):match("^(%S+) ")
+  if not head or head:find("[%w%p]") then return "idle" end
+  return head == "✳" and "idle" or "working"
+end
+
 -- The agent rows, and for each agents pane the tab it sits in, so each panel
 -- can mark the agent in its own tab's focused pane.
 local function snapshot()
@@ -136,8 +144,8 @@ local function snapshot()
             local fg = proc and proc.foreground or {}
             local app = root and (root.effective_app or root.app or "?") or agent_app(fg)
             if app then
-              root = root or {}
               local title = method(s.session_id, b.block_id, "title")
+              root = root or { state = title_state(title and title.title) }
               rows[#rows + 1] = {
                 session_id = s.session_id,
                 window_id  = w.window_id,
