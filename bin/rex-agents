@@ -459,7 +459,8 @@ def usage_lines(width):
         icon = agent_icon(p["app"])
         limits = p.get("limits")
         if limits is None:
-            out.append(f"{icon} {DETAIL}plan limits: see README\x1b[0m")
+            # Cut to fit: a narrow pane would wrap it onto a second line.
+            out.append(f"{icon} {DETAIL}{'plan limits: see README'[: max(width - 3, 0)]}\x1b[0m")
         for i, limit in enumerate(limits or []):
             pct = max(0.0, min(float(limit["pct"]), 100.0))
             filled = round(pct / 100 * bar_width)
