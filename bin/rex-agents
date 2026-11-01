@@ -208,20 +208,23 @@ def fit_width():
             return
 
 
-def app_client():
-    for client in (rex("client", "ls", "--json") or {}).get("clients", []):
-        if (client.get("info") or {}).get("kind") == "app":
-            return client["client_id"]
-    return None
+def app_clients():
+    """The apps to switch when jumping. Rex doesn't say which app a key came
+    from, and a host can have several connected (each machine's own, say), so
+    take every app showing this panel's session, else every app."""
+    apps = [c for c in (rex("client", "ls", "--json") or {}).get("clients", [])
+            if (c.get("info") or {}).get("kind") == "app" and c.get("connection_state", "connected") == "connected"]
+    showing = [c for c in apps if SELF_SESSION in (c.get("session_ids") or [])]
+    return [c["client_id"] for c in showing or apps]
 
 
 def jump(row):
-    # The app shows every host's sessions, so it selects a remote one by its ID too.
-    client = os.environ.get("REX_CLIENT") or app_client()
-    if client:
-        args = [f"session_id={row['session_id']}"]
-        if row.get("window_id"):
-            args.append(f"window_id={row['window_id']}")
+    # An app shows every host's sessions, so it selects a remote one by its ID too.
+    args = [f"session_id={row['session_id']}"]
+    if row.get("window_id"):
+        args.append(f"window_id={row['window_id']}")
+    clients = [os.environ["REX_CLIENT"]] if os.environ.get("REX_CLIENT") else app_clients()
+    for client in clients:
         subprocess.run(["rex", "-C", client, "do", "session.select", *args], capture_output=True)
     if row.get("block_id"):
         server = ["-S", row["server"]] if row.get("server") else []
