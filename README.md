@@ -35,8 +35,8 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Names from the agent:** Claude Code's `/rename` name (read from the terminal title), falling back to the Rex session name.
 - **Git branch and state** for each agent's directory: changed files `●N`, ahead `↑N`, behind `↓N`, or `✓` when clean.
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
-- **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session or tab.
-- **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host.
+- **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session, tab or host.
+- **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host. See [Remote hosts](#remote-hosts).
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
@@ -46,7 +46,7 @@ Agents appear when they report their status with Rex's [program status protocol]
 ## Requirements
 
 - Rex (beta) on macOS or Linux
-- Python 3 on the machine running the Rex server
+- Python 3 on the machine running the Rex server (on each host, for panels there)
 - `git`, for the branch line
 - `jq`, only for saving Claude Code's plan limits (see [Usage section](#usage-section))
 
@@ -111,9 +111,9 @@ In the panel:
 
 | Key | Does |
 | --- | --- |
-| `1`–`9` | Jump to that agent |
+| `1`–`9` | Jump to that row: an agent's pane, or a remote session |
 | `↑` `↓` / `j` `k` | Move the selection |
-| `Enter` | Jump to the selected agent |
+| `Enter` | Jump to the selected row |
 | `q` | Close this tab's panel |
 
 In the switcher, `Esc` closes it.
@@ -128,6 +128,36 @@ In the switcher, `Esc` closes it.
 | `remote_host` | first host | The host `remote_session` uses when not given one. |
 | `panel_columns` | `29` | Width of the panel, in columns. |
 | `rex_bin` | found automatically | Path to the `rex` binary, if it isn't found. |
+
+## Remote hosts
+
+The panel lists every host in `rex hosts` on the machine it runs on. To add one:
+
+```sh
+rex hosts add studio https://studio-rex.example.ts.net
+rex hosts check
+```
+
+Then reopen the panel (`panel_key` twice): the collector reads the host list when it starts.
+
+**A panel in a remote session's tabs** needs rex-agents installed on that host too, since a pane runs on the server that owns its tab. Install it there [by hand](#by-hand), then reload and open the panel on that machine (Rex only reloads the configuration from the machine itself):
+
+```sh
+rex config reload
+rex do agents_panel
+```
+
+That host's panel lists its own agents, and another machine's only if that machine is in its `rex hosts`.
+
+**Seeing each machine from the other** means each one's Rex server has to be reachable from the other. With Tailscale:
+
+- In Rex for Mac, turn on Tailscale serving in Settings. The server gets its own tailnet name, such as `laptop-rex.<tailnet>.ts.net`.
+- If the machines are on different tailnets, a shared machine is reachable only from the tailnet it's shared into. Share each machine's Rex node with the other tailnet, or put both on one.
+- Add each machine to the other's `rex hosts`. If the first connection times out during the TLS handshake, try again once the certificate has been issued.
+
+**Jumping from a host's panel.** Rex doesn't say which app a key came from, and a host can have several apps connected (each machine's own, say). So a jump switches every app showing the panel's session, all at once.
+
+**Width.** The panel's width is a share of its tab, and apps with different window sizes can show the same tab. The panel resizes itself to `panel_columns` whenever the app driving the tab's size changes, such as when you click into a tab another app was showing.
 
 ## Usage section
 
@@ -157,15 +187,16 @@ Claude Code sends plan limits on subscription plans; a window shows once Claude 
 
 ## How it works
 
-- `lua/rex-agents/init.lua` defines the two actions.
+- `lua/rex-agents/init.lua` defines the three actions.
 - Turning the panel on starts `lua/rex-agents/collect.lua` with `rex do --all`. It adds a panel to every tab (and to tabs created later), listens for status, title, process and layout events, and writes the agent list to `$XDG_CACHE_HOME/rex-agents/state.json` (default `~/.cache`). It exits once the last panel closes.
 - Remote hosts send no events to this server, so the collector polls each one every 3 seconds, and waits 30 seconds before trying a host that didn't answer. Lua actions in `init.lua` can't reach other hosts, so `agents_waiting` and `remote_session` do that part through the `rex` CLI (`lua/rex-agents/waiting.lua`).
 - Each panel runs `bin/rex-agents`, which redraws whenever that file changes. Every 30 seconds one panel (whichever takes the lock) rereads usage into `usage.json` beside it.
 
 ## Limitations
 
-- Panels are added to tabs on this machine's server only. Remote agents show in them, but a remote session's tabs get no panel.
+- Panels are added to tabs on this machine's server only. For panels in a remote session's tabs, install rex-agents on that host too.
 - A remote agent's row has no git branch line, since git runs on this machine.
+- Remote rows update every 3 seconds instead of instantly. While a host is slow to answer, local updates wait too, for up to 10 seconds; then the host is skipped for 30.
 - A panel lives in one tab; Rex has no pane that spans tabs, so each tab gets its own.
 - Rex can't exempt a single pane from "Fade inactive panes".
 
