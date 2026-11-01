@@ -200,9 +200,16 @@ def fit_width():
             if not (size.get("columns") and share):
                 return
             total = size["columns"] / share  # the whole tab, in columns
-            ratio = 1 - PANEL_COLUMNS / total
+            current = split.get("ratio", 0.5)
+            if sized:
+                # This pane's real width is known: correct by the miss, which
+                # also covers the columns that padding between panes takes.
+                miss = PANEL_COLUMNS - os.get_terminal_size().columns
+            else:
+                miss = (current - (1 - PANEL_COLUMNS / total)) * total
+            ratio = current - miss / total
             # The collector usually got it right already; only fix a real miss.
-            if total > PANEL_COLUMNS and abs(ratio - split.get("ratio", 0.5)) * total >= 1:
+            if total > PANEL_COLUMNS and abs(miss) >= 1 and 0.3 < ratio < 0.98:
                 args = {"direction": "horizontal", "before_block_id": node["block_id"],
                         "after_block_id": SELF_BLOCK, "ratio": ratio}
                 rex("api", "call", "-s", SELF_SESSION, "session.resize_pane", json.dumps(args))
