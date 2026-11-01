@@ -238,6 +238,8 @@ def jump(row):
 HOST_ICON = "⇄"  # marks a remote host's divider
 SESSION_ICON = "▫"  # a remote session
 
+RESIZE_SETTLE = 0.5  # seconds after the last resize before checking the width
+
 GIT_TTL = 5  # seconds before a repo's branch state is read again
 _git_cache = {}
 
@@ -591,9 +593,13 @@ def main():
     sys.stdout.flush()
     rows, cursor, seen, last_render, usage_seen = None, 0, None, 0.0, None
 
+    resized_at = None  # when the pane last changed size, until the width is checked
+
     def on_resize(*_):
         global sized
+        nonlocal resized_at
         sized = True
+        resized_at = time.monotonic()
         render(rows, cursor)
 
     signal.signal(signal.SIGWINCH, on_resize)
@@ -635,6 +641,12 @@ def main():
                 last_render = time.monotonic()
             # Its own clock: the agent list can change too often for the
             # branch above to come round. A stat, unless USAGE_TTL is up.
+            # The width is a share of the tab, and apps with different window
+            # sizes can show the same tab, so check it again once a resize
+            # (such as another app taking over the size) has settled.
+            if resized_at and time.monotonic() - resized_at >= RESIZE_SETTLE:
+                resized_at = None
+                fit_width()
             refresh_usage()
             usage_mtime = mtime_of(USAGE)
             if usage_mtime != usage_seen:
