@@ -77,6 +77,10 @@ def agent_name(row):
     """The agent's conversation name from its terminal title (Claude's /rename
     sets it), or the Rex session name when the title is just the program."""
     title = (row.get("title") or "").strip()
+    # Claude puts a status glyph (✳, or a braille spinner) in front of its title.
+    head, _, rest = title.partition(" ")
+    if rest and head and not any(c.isalnum() for c in head):
+        title = rest.strip()
     if not title or title.lower().replace(" ", "-") in (row["app"], "claude-code", "codex", "opencode", "pi"):
         return row["session"]
     return title

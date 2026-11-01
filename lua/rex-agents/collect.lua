@@ -103,6 +103,18 @@ local function add_panel(sid, window)
   end
 end
 
+-- Agents by executable name, for panes running one that has no status
+-- record: Rex drops a done record once it's been seen, and the agent doesn't
+-- report again until its next turn.
+local AGENTS = { claude = "claude-code", codex = "codex", opencode = "opencode", pi = "pi" }
+
+local function agent_app(fg)
+  for _, n in ipairs({ fg.argv0 or false, fg.name or false, fg.invoked_path or false }) do
+    local app = n and AGENTS[n:match("([^/]+)$")]
+    if app then return app end
+  end
+end
+
 -- The agent rows, and for each agents pane the tab it sits in, so each panel
 -- can mark the agent in its own tab's focused pane.
 local function snapshot()
@@ -120,8 +132,11 @@ local function snapshot()
             for _, r in ipairs(status and status.records or {}) do
               if r.id == nil then root = r end
             end
-            if root then
-              local proc = method(s.session_id, b.block_id, "process")
+            local proc = method(s.session_id, b.block_id, "process")
+            local fg = proc and proc.foreground or {}
+            local app = root and (root.effective_app or root.app or "?") or agent_app(fg)
+            if app then
+              root = root or {}
               local title = method(s.session_id, b.block_id, "title")
               rows[#rows + 1] = {
                 session_id = s.session_id,
@@ -131,9 +146,9 @@ local function snapshot()
                 title      = title and title.title or "",
                 state      = root.state or "idle",
                 kind       = root.kind or "",
-                app        = root.effective_app or root.app or "?",
+                app        = app,
                 msg        = root.msg or "",
-                cwd        = proc and proc.foreground and proc.foreground.cwd or "",
+                cwd        = fg.cwd or "",
                 updated    = root.updated_at or "",
                 focused    = w.focused_block_id == b.block_id,
               }
