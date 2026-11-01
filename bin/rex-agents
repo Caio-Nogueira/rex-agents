@@ -155,7 +155,8 @@ def read_state():
     for row in rows:
         row["here"] = bool(row.get("focused")) and row["window_id"] == my_window
         row["msg"] = row.get("msg") or ""  # Rex has already decoded it
-        row["cwd"] = (row.get("cwd") or "").replace(HOME, "~")
+        if not row.get("server"):  # a remote host's home is its own
+            row["cwd"] = (row.get("cwd") or "").replace(HOME, "~")
     rows.sort(key=lambda r: (ORDER.get(r["state"], 9), agent_name(r), r["updated"]))
     return rows
 
@@ -197,13 +198,17 @@ def app_client():
 
 
 def jump(row):
+    # The app shows every host's sessions, so it selects a remote one by its ID too.
     client = os.environ.get("REX_CLIENT") or app_client()
     if client:
         subprocess.run(["rex", "-C", client, "do", "session.select",
                         f"session_id={row['session_id']}", f"window_id={row['window_id']}"],
                        capture_output=True)
-    subprocess.run(["rex", "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
+    server = ["-S", row["server"]] if row.get("server") else []
+    subprocess.run(["rex", *server, "focus", "-s", row["session_id"], row["block_id"]], capture_output=True)
 
+
+HOST_ICON = "⇄"  # marks an agent on a remote host
 
 GIT_TTL = 5  # seconds before a repo's branch state is read again
 _git_cache = {}
@@ -493,9 +498,13 @@ def render(rows, cursor):
         elif row["cwd"]:
             leaf = os.path.basename(row["cwd"].rstrip("/")) or row["cwd"]
             out.append(f"{DETAIL}    {fit(leaf, width - 4)}\x1b[0m")
-        info = git_info(row["cwd"])
-        if info:
-            out.append(branch_line(info, width))
+        if row.get("server"):
+            # git can't see a remote host's files; name the host instead.
+            out.append(f"{DETAIL}    {fit(HOST_ICON + ' ' + row['server'], width - 4)}\x1b[0m")
+        else:
+            info = git_info(row["cwd"])
+            if info:
+                out.append(branch_line(info, width))
     usage = usage_lines(width)
     if usage:
         # Sit at the bottom of the panel when there's room, else just below.

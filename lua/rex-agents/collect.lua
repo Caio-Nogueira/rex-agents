@@ -7,6 +7,9 @@
 -- STATE as JSON whenever something changes. bin/rex-agents, which runs in
 -- each of those panes, only reads that file.
 --
+-- Agents on remote hosts (rex hosts) are listed too. Their events don't reach
+-- this server, so each host is polled every REMOTE_EVERY seconds.
+--
 -- Exits once the last agents pane is closed.
 
 local TERMINAL = "com.superlogical.terminal"
@@ -21,23 +24,29 @@ if not PANEL_COMMAND then
   rex.stop(1)
 end
 
+local REMOTE_EVERY = 3  -- seconds between polls of each remote host
+local REMOTE_RETRY = 30 -- seconds to wait after a host fails to answer
+
 local dirty = true
 
-local function method(sid, bid, name)
-  return rex.call("block.method", { session_id = sid, block_id = bid, method = name, args = {} })
+-- api is rex for this server, or rex.server(label) for a remote host.
+local function method(api, sid, bid, name)
+  return api.call("block.method", { session_id = sid, block_id = bid, method = name, args = {} })
 end
 
-local attached = {}
+local attached = {} -- server label ("" here) -> session id -> true
 
 -- Every session, attached first: when the server starts this script (from the
 -- agents_panel action) it isn't attached to any, and session calls fail with
 -- "stream is not attached to session".
-local function sessions()
-  local list = rex.call("session.list") or { sessions = {} }
+local function sessions(api, server)
+  server = server or ""
+  attached[server] = attached[server] or {}
+  local list = api.call("session.list") or { sessions = {} }
   for _, s in ipairs(list.sessions) do
-    if not attached[s.session_id] then
-      local _, err = rex.session.attach{ session_id = s.session_id }
-      if err == nil then attached[s.session_id] = true end
+    if not attached[server][s.session_id] then
+      local _, err = api.session.attach{ session_id = s.session_id }
+      if err == nil then attached[server][s.session_id] = true end
     end
   end
   return list.sessions
@@ -53,7 +62,7 @@ local function has_panel(window)
 end
 
 local function any_panel()
-  for _, s in ipairs(sessions()) do
+  for _, s in ipairs(sessions(rex)) do
     local view = rex.session.view{ session_id = s.session_id }
     for _, w in ipairs(view and view.windows or {}) do
       if has_panel(w) then return true end
@@ -67,7 +76,7 @@ end
 local function panel_ratio(sid, layout)
   local node = layout
   while node.split do node = node.split.before end
-  local size = method(sid, node.block_id, "size")
+  local size = method(rex, sid, node.block_id, "size")
   local share = node.rect and node.rect[3] or 0
   if not (size and size.columns and share > 0) then return 0.85 end
   local total = size.columns / share
@@ -123,30 +132,31 @@ local function title_state(title)
   return head == "✳" and "idle" or "working"
 end
 
--- The agent rows, and for each agents pane the tab it sits in, so each panel
--- can mark the agent in its own tab's focused pane.
-local function snapshot()
-  local rows, panels = {}, {}
-  for _, s in ipairs(sessions()) do
-    local view = rex.session.view{ session_id = s.session_id }
+-- Adds the agent rows of one server to rows, and for each agents pane the tab
+-- it sits in to panels, so each panel can mark the agent in its own tab's
+-- focused pane. server is the remote host's label, nil here.
+local function scan(api, server, rows, panels)
+  for _, s in ipairs(sessions(api, server)) do
+    local view = api.session.view{ session_id = s.session_id }
     for _, w in ipairs(view and view.windows or {}) do
       for _, layer in ipairs(w.layers) do
         for _, b in ipairs(layer.blocks) do
           if b.label == PANEL_LABEL then
             panels[b.block_id] = w.window_id
           elseif b.creator_name == TERMINAL then
-            local status = method(s.session_id, b.block_id, "program_status")
+            local status = method(api, s.session_id, b.block_id, "program_status")
             local root
             for _, r in ipairs(status and status.records or {}) do
               if r.id == nil then root = r end
             end
-            local proc = method(s.session_id, b.block_id, "process")
+            local proc = method(api, s.session_id, b.block_id, "process")
             local fg = proc and proc.foreground or {}
             local app = root and (root.effective_app or root.app or "?") or agent_app(fg)
             if app then
-              local title = method(s.session_id, b.block_id, "title")
+              local title = method(api, s.session_id, b.block_id, "title")
               root = root or { state = app == "claude-code" and title_state(title and title.title) or "idle" }
               rows[#rows + 1] = {
+                server     = server,
                 session_id = s.session_id,
                 window_id  = w.window_id,
                 block_id   = b.block_id,
@@ -166,15 +176,54 @@ local function snapshot()
       end
     end
   end
+end
+
+local remote_rows = {} -- host label -> its rows from the last poll
+local retry_at = {}    -- host label -> when to try a host that failed again
+
+local function poll_remotes()
+  local ok, labels = pcall(rex.servers)
+  local seen = {}
+  for _, label in ipairs(ok and labels or {}) do
+    seen[label] = true
+    if os.time() >= (retry_at[label] or 0) then
+      local rows = {}
+      local polled, err = pcall(scan, rex.server(label), label, rows, {})
+      if polled then
+        retry_at[label] = nil
+      else
+        rex.log("warn", "rex-agents: " .. label .. ": " .. tostring(err))
+        rows, retry_at[label], attached[label] = {}, os.time() + REMOTE_RETRY, nil
+      end
+      remote_rows[label] = rows
+      dirty = true
+    end
+  end
+  for label in pairs(remote_rows) do
+    if not seen[label] then remote_rows[label] = nil end
+  end
+end
+
+local function snapshot()
+  local rows, panels = {}, {}
+  scan(rex, nil, rows, panels)
+  for _, host_rows in pairs(remote_rows) do
+    for _, row in ipairs(host_rows) do rows[#rows + 1] = row end
+  end
   return rows, panels
 end
 
+local last_written
+
 local function write_state(rows, panels)
+  local json = rex.json.encode({ agents = rows, panels = panels })
+  if json == last_written then return end -- remote polls mostly change nothing
   local tmp = STATE .. ".tmp"
   local f = io.open(tmp, "w")
   if not f then return end
-  f:write(rex.json.encode({ agents = rows, panels = panels }))
+  f:write(json)
   f:close()
+  last_written = json
   os.rename(tmp, STATE) -- atomic, so readers never see half a file
 end
 
@@ -189,7 +238,7 @@ for _, name in ipairs{
   rex.on(name, mark)
 end
 
-rex.on("session_destroyed", function(ctx, ev) attached[ev.session_id] = nil end)
+rex.on("session_destroyed", function(ctx, ev) attached[""][ev.session_id] = nil end)
 
 rex.on("window_created", function(ctx, ev)
   local view = rex.session.view{ session_id = ctx.session_id }
@@ -213,8 +262,11 @@ end)
 -- Safety net for anything the events above miss.
 rex.every(15, mark)
 
+rex.every(REMOTE_EVERY, poll_remotes)
+
 rex.exec({ "mkdir", "-p", STATE_DIR })
-for _, s in ipairs(sessions()) do
+poll_remotes()
+for _, s in ipairs(sessions(rex)) do
   local view = rex.session.view{ session_id = s.session_id }
   for _, w in ipairs(view and view.windows or {}) do
     add_panel(s.session_id, w)

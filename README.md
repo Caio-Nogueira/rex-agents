@@ -1,6 +1,6 @@
 # rex-agents
 
-A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a narrow panel on the right of every tab with one row per coding agent across all your sessions, and adds a key that jumps to whichever agent is waiting on you.
+A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a narrow panel on the right of every tab with one row per coding agent across all your sessions and remote hosts, and adds a key that jumps to whichever agent is waiting on you.
 
 ```
  🔴 1 waiting  ↑↓ · q
@@ -30,6 +30,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Git branch and state** for each agent's directory: changed files `●N`, ahead `↑N`, behind `↓N`, or `✓` when clean.
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session or tab.
+- **Remote hosts too:** agents on your other Rex servers (`rex hosts`) are listed, marked `⇄ host`, and jumping to one opens that host's session. Another key opens a new session on a remote host.
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
@@ -90,8 +91,15 @@ Then run `rex config reload`.
 | --- | --- | --- |
 | `panel_key` | `agents_panel` | Show or hide the panel in every tab. New tabs get one too while it's on. |
 | `waiting_key` | `agents_waiting` | Go to the agent waiting on you. With several, pick one from a switcher. |
+| `remote_key` | `remote_session` | Open a new session on a remote host and go there. |
 
-Both actions are also in the command palette ("Toggle Agents Panel", "Go to Waiting Agent") and can be run with `rex do agents_panel`.
+The actions are also in the command palette ("Toggle Agents Panel", "Go to Waiting Agent", "New Session on Remote Host") and can be run with `rex do agents_panel`.
+
+`remote_session` takes optional `host`, `label` and `command` arguments, so you can bind a key per host or one that starts an agent there:
+
+```lua
+rex.bind("ctrl+cmd+c", "remote_session", { host = "studio", command = { "claude" } })
+```
 
 In the panel:
 
@@ -110,6 +118,8 @@ In the switcher, `Esc` closes it.
 | --- | --- | --- |
 | `panel_key` | none | Key for `agents_panel`. Without it, no key is bound. |
 | `waiting_key` | none | Key for `agents_waiting`. Without it, no key is bound. |
+| `remote_key` | none | Key for `remote_session`. Without it, no key is bound. |
+| `remote_host` | first host | The host `remote_session` uses when not given one. |
 | `panel_columns` | `29` | Width of the panel, in columns. |
 | `rex_bin` | found automatically | Path to the `rex` binary, if it isn't found. |
 
@@ -143,11 +153,13 @@ Claude Code sends plan limits on subscription plans; a window shows once Claude 
 
 - `lua/rex-agents/init.lua` defines the two actions.
 - Turning the panel on starts `lua/rex-agents/collect.lua` with `rex do --all`. It adds a panel to every tab (and to tabs created later), listens for status, title, process and layout events, and writes the agent list to `$XDG_CACHE_HOME/rex-agents/state.json` (default `~/.cache`). It exits once the last panel closes.
+- Remote hosts send no events to this server, so the collector polls each one every 3 seconds, and waits 30 seconds before trying a host that didn't answer. Lua actions in `init.lua` can't reach other hosts, so `agents_waiting` and `remote_session` do that part through the `rex` CLI (`lua/rex-agents/waiting.lua`).
 - Each panel runs `bin/rex-agents`, which redraws whenever that file changes. Every 30 seconds one panel (whichever takes the lock) rereads usage into `usage.json` beside it.
 
 ## Limitations
 
-- Only agents on the local Rex server are listed, not ones on remote hosts.
+- Panels are added to tabs on this machine's server only. Remote agents show in them, but a remote session's tabs get no panel.
+- A remote agent's row has no git branch line, since git runs on this machine.
 - A panel lives in one tab; Rex has no pane that spans tabs, so each tab gets its own.
 - Rex can't exempt a single pane from "Fade inactive panes".
 
