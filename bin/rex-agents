@@ -155,10 +155,11 @@ def read_state():
     try:
         with open(STATE, encoding="utf-8") as f:
             state = json.load(f)
-        agents = state["agents"]
+        # Rex encodes an empty list as {}.
+        agents = list(state["agents"] or [])
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return None
-    hosts = state.get("hosts") or []
+    hosts = list(state.get("hosts") or [])
     my_window = (state.get("panels") or {}).get(SELF_BLOCK)
     for row in agents:
         row["here"] = bool(row.get("focused")) and row["window_id"] == my_window
