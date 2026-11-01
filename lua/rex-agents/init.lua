@@ -93,8 +93,9 @@ function M.setup(opts)
         return
       end
 
+      local rex_bin = find_rex(opts.rex_bin)
       local _, err2 = rex.exec.start(
-        { find_rex(opts.rex_bin), "do", "--all", COLLECTOR, "panel=" .. PANEL_BIN, "columns=" .. columns },
+        { rex_bin, "do", "--all", COLLECTOR, "panel=" .. PANEL_BIN, "columns=" .. columns, "rex=" .. rex_bin },
         { detach = true, stdout = false, stderr = false })
       if err2 ~= nil then error(err2, 0) end
     end,

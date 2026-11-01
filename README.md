@@ -138,7 +138,7 @@ rex hosts add studio https://studio-rex.example.ts.net
 rex hosts check
 ```
 
-Then reopen the panel (`panel_key` twice): the collector reads the host list when it starts.
+The panel picks it up within a few seconds.
 
 **A panel in a remote session's tabs** needs rex-agents installed on that host too, since a pane runs on the server that owns its tab. Install it there [by hand](#by-hand), then reload and open the panel on that machine (Rex only reloads the configuration from the machine itself):
 
@@ -189,14 +189,15 @@ Claude Code sends plan limits on subscription plans; a window shows once Claude 
 
 - `lua/rex-agents/init.lua` defines the three actions.
 - Turning the panel on starts `lua/rex-agents/collect.lua` with `rex do --all`. It adds a panel to every tab (and to tabs created later), listens for status, title, process and layout events, and writes the agent list to `$XDG_CACHE_HOME/rex-agents/state.json` (default `~/.cache`). It exits once the last panel closes.
-- Remote hosts send no events to this server, so the collector polls each one every 3 seconds, and waits 30 seconds before trying a host that didn't answer. Lua actions in `init.lua` can't reach other hosts, so `agents_waiting` and `remote_session` do that part through the `rex` CLI (`lua/rex-agents/waiting.lua`).
+- Remote hosts send no events to this server, so every 3 seconds the collector runs `lua/rex-agents/remote.lua` with `rex do` to poll them. Each poll gets a fresh connection, so the list recovers by itself after the machine sleeps or the network changes. A host that doesn't answer shows as unreachable and is tried again after 30 seconds. `lua/rex-agents/scan.lua` holds the scanning code both share.
+- Lua actions in `init.lua` can't reach other hosts, so `agents_waiting` and `remote_session` do that part through the `rex` CLI (`lua/rex-agents/waiting.lua`).
 - Each panel runs `bin/rex-agents`, which redraws whenever that file changes. Every 30 seconds one panel (whichever takes the lock) rereads usage into `usage.json` beside it.
 
 ## Limitations
 
 - Panels are added to tabs on this machine's server only. For panels in a remote session's tabs, install rex-agents on that host too.
 - A remote agent's row has no git branch line, since git runs on this machine.
-- Remote rows update every 3 seconds instead of instantly. While a host is slow to answer, local updates wait too, for up to 10 seconds; then the host is skipped for 30.
+- Remote rows update every 3 seconds instead of instantly. While a host is slow to answer, local updates wait too, for up to 8 seconds; then the host is skipped for 30.
 - A panel lives in one tab; Rex has no pane that spans tabs, so each tab gets its own.
 - Rex can't exempt a single pane from "Fade inactive panes".
 
