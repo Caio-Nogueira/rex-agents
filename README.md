@@ -101,10 +101,18 @@ Then run `rex config reload`.
 
 The actions are also in the command palette ("Toggle Agents Panel", "Go to Waiting Agent", "New Session on Remote Host") and can be run with `rex do agents_panel`.
 
-`remote_session` takes optional `host`, `label` and `command` arguments, so you can bind a key per host or one that starts an agent there:
+`remote_session` takes optional `host`, `label` and `command` arguments, so you can bind a key per host or one that starts an agent there. See [Remote sessions](#remote-sessions) for more.
 
 ```lua
 rex.bind("ctrl+cmd+c", "remote_session", { host = "studio", command = { "claude" } })
+```
+
+From a shell, the same actions:
+
+```sh
+rex do agents_panel                      # toggle the panel in every tab
+rex do agents_waiting                    # go to the waiting agent
+rex do remote_session host=studio        # new session on studio
 ```
 
 In the panel:
@@ -131,35 +139,115 @@ In the switcher, `Esc` closes it.
 
 ## Remote hosts
 
-The panel lists every host in `rex hosts` on the machine it runs on. To add one:
+The panel lists every host in `rex hosts` on the machine it runs on, each in its own section below a `⇄` divider. To add one:
 
 ```sh
 rex hosts add studio https://studio-rex.example.ts.net
 rex hosts check
 ```
 
-The panel picks it up within a few seconds.
+The panel picks it up within a few seconds. Remove it with `rex hosts remove studio`.
 
-**A panel in a remote session's tabs** needs rex-agents installed on that host too, since a pane runs on the server that owns its tab. Install it there [by hand](#by-hand), then reload and open the panel on that machine (Rex only reloads the configuration from the machine itself):
+A host's section shows its agents first, then every session on it:
+
+```
+── ⇄ studio ──────────────
+4 🔴 ✻ data-pipeline         ← an agent on studio, waiting
+    needs approval: Bash: d…
+5 ⏳ ✻ etl-backfill
+    Loading partitions…
+6 ▫ data-pipeline            ← studio's sessions, by name
+7 ▫ etl-backfill
+8 ▫ scratch
+
+── ⇄ mini ────────────────
+  unreachable                ← didn't answer; tried again in 30s
+
+── ⇄ build ───────────────
+  no sessions
+```
+
+### Remote sessions
+
+**Jump to one.** Press its number, or select it and press `Enter`. The app switches to that session on the host, in the tab it last showed. Jumping to a remote agent's row goes to its pane.
+
+**Open a new one** with `remote_key` (the `remote_session` action). It creates a session on the host and switches to it. With no arguments it uses `remote_host`, or the first host in `rex hosts`.
+
+```lua
+local agents = dofile(os.getenv("HOME") .. "/.local/share/rex/plugins/irfn/rex-agents/lua/rex-agents/init.lua")
+agents.setup{
+  panel_key   = "cmd+l",
+  waiting_key = "cmd+e",
+  remote_key  = "ctrl+cmd+n",  -- new session on remote_host
+  remote_host = "studio",
+}
+
+-- A key per host
+rex.bind("ctrl+cmd+m", "remote_session", { host = "mini" })
+
+-- Start an agent on a host, in a session with a name
+rex.bind("ctrl+cmd+c", "remote_session", { host = "studio", label = "review", command = { "claude" } })
+rex.bind("ctrl+cmd+x", "remote_session", { host = "studio", command = { "codex" } })
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `host` | The host's label in `rex hosts`. Default: `remote_host`, else the first host. |
+| `label` | Name for the new session. Default: Rex picks one. |
+| `command` | Program to run in its first pane, as a list. Default: the host's shell. |
+
+The new session shows up in the panel on the next poll, within 3 seconds.
+
+**Keys inside a remote session.** Rex runs a key's action on your machine even while the app shows a remote session, so the actions look up which host owns the session and act there:
+
+- `panel_key` toggles that host's own panels (see below), not yours.
+- `waiting_key` goes to the first waiting agent across all hosts, since the switcher is a pane on your machine and can't be shown in a remote tab.
+- `remote_key` works the same anywhere.
+
+### Panels in a remote session's tabs
+
+A pane runs on the server that owns its tab, so a panel in a remote session's tabs needs rex-agents installed on that host too. Install it there [by hand](#by-hand), then reload and open the panel on that machine (Rex only reloads the configuration from the machine itself):
 
 ```sh
+# on the host
+git clone https://github.com/irfn/rex-agents ~/.local/share/rex/plugins/irfn/rex-agents
+# add the dofile(...).setup{...} line to ~/.config/rex/init.lua, then:
 rex config reload
 rex do agents_panel
 ```
 
-That host's panel lists its own agents, and another machine's only if that machine is in its `rex hosts`.
+Afterwards `panel_key` in that host's sessions works from your machine. That host's panel lists its own agents, and another machine's only if that machine is in its `rex hosts`.
 
-`panel_key` pressed while you're in a remote host's session toggles that host's panels, and `waiting_key` there goes to the first waiting agent, since the switcher can't be shown on another machine.
+To update it later, `git -C ~/.local/share/rex/plugins/irfn/rex-agents pull`, then `rex config reload` on the host.
 
-**Seeing each machine from the other** means each one's Rex server has to be reachable from the other. With Tailscale:
+### Example: a laptop and a Mac mini over Tailscale
 
-- In Rex for Mac, turn on Tailscale serving in Settings. The server gets its own tailnet name, such as `laptop-rex.<tailnet>.ts.net`.
-- If the machines are on different tailnets, a shared machine is reachable only from the tailnet it's shared into. Share each machine's Rex node with the other tailnet, or put both on one.
-- Add each machine to the other's `rex hosts`. If the first connection times out during the TLS handshake, try again once the certificate has been issued.
+Each machine's Rex server has to be reachable from the other for each to list the other.
+
+1. In Rex for Mac on both, turn on Tailscale serving in Settings. Each server gets its own tailnet name, such as `laptop-rex.<tailnet>.ts.net` and `mini-rex.<tailnet>.ts.net`.
+2. If the machines are on different tailnets, a shared machine is reachable only from the tailnet it's shared into. Share each machine's Rex node with the other's tailnet, or put both on one.
+3. Add each to the other's hosts:
+
+   ```sh
+   # on the laptop
+   rex hosts add mini https://mini-rex.<tailnet>.ts.net
+   # on the mini
+   rex hosts add laptop https://laptop-rex.<tailnet>.ts.net
+   rex hosts check
+   ```
+
+   If the first connection times out during the TLS handshake, try again once the certificate has been issued.
+4. Install rex-agents on the mini as above, and open the panel on both.
+
+Now the laptop's panel shows the mini's agents and sessions under `⇄ mini`, `ctrl+cmd+n` opens a session on the mini, and `cmd+l` in a mini session toggles the mini's panels.
+
+### Notes
 
 **Jumping from a host's panel.** Rex doesn't say which app a key came from, and a host can have several apps connected (each machine's own, say). So a jump switches every app showing the panel's session, all at once.
 
 **Width.** The panel's width is a share of its tab, and apps with different window sizes can show the same tab. The panel resizes itself to `panel_columns` whenever the app driving the tab's size changes, such as when you click into a tab another app was showing.
+
+**Sleep and network changes.** Each poll of a host uses a fresh connection, so a host comes back by itself after your machine wakes or changes networks.
 
 ## Usage section
 
