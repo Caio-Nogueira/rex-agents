@@ -188,7 +188,11 @@ def fit_width():
     for window in view.get("windows", []):
         for layer in window.get("layers", []):
             split = (layer.get("layout") or {}).get("split") or {}
-            if layer.get("kind") != "tiled" or (split.get("after") or {}).get("block_id") != SELF_BLOCK:
+            # The right side is this pane, or this pane above a rex-orbit pane.
+            right = split.get("after") or {}
+            if "split" in right and right["split"].get("direction") == "vertical":
+                right = right["split"].get("before") or {}
+            if layer.get("kind") != "tiled" or right.get("block_id") != SELF_BLOCK:
                 continue
             # Measure the tab from a neighbouring pane: this pane's own size is
             # still a placeholder this soon after it was created.

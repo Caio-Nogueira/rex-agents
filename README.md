@@ -136,6 +136,33 @@ In the switcher, `Esc` closes it.
 | `remote_host` | first host | The host `remote_session` uses when not given one. |
 | `panel_columns` | `29` | Width of the panel, in columns. |
 | `rex_bin` | found automatically | Path to the `rex` binary, if it isn't found. |
+| `orbit` | none | Path to a clone of [rex-orbit](https://github.com/benhid/rex-orbit), or a command as a list, to show its bots under the list. See [Orbit](#orbit). |
+| `orbit_height` | `0.3` | The orbit pane's share of the column's height. |
+| `orbit_fps` | `12` | rex-orbit's frame rate, when `orbit` is a path. |
+| `node_bin` | found automatically | Path to `node`, for `orbit`. |
+
+## Orbit
+
+[rex-orbit](https://github.com/benhid/rex-orbit) by benhid draws each Claude Code session as a small pixel bot that hops and shows `!` when it needs you. With the `orbit` option, every agents panel gets a rex-orbit pane below it, in the same column. It needs Node.js 20 or newer.
+
+```sh
+git clone https://github.com/benhid/rex-orbit ~/.local/share/rex/plugins/benhid/rex-orbit
+```
+
+```lua
+agents.setup{
+  panel_key = "cmd+l",
+  orbit     = os.getenv("HOME") .. "/.local/share/rex/plugins/benhid/rex-orbit",
+}
+```
+
+Or give the whole command, to pass rex-orbit's own flags:
+
+```lua
+orbit = { "/opt/homebrew/bin/node", os.getenv("HOME") .. "/.local/share/rex/plugins/benhid/rex-orbit/bin/rex-orbit.mjs", "--fps", "8", "--no-dino" },
+```
+
+The orbit pane opens and closes with its tab's panel, including when `q` closes the panel. Each tab runs its own copy, which takes about 3% of a core and 120 MB at 12 frames a second, so lower `orbit_fps` or leave out the dinosaur (`--no-dino`) with many tabs. rex-orbit shows this machine's Claude Code sessions only.
 
 ## Remote hosts
 

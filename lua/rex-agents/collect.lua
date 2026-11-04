@@ -1,6 +1,7 @@
 -- rex-agents collector. The agents_panel action runs one copy with:
 --
 --   rex do --all collect.lua panel=<path to bin/rex-agents> columns=<width> rex=<path to rex>
+--     [orbit=<rex-orbit command as JSON> orbit_height=<share of the panel's height>]
 --
 -- Keeps an "agents" pane on the right edge of every tab, including tabs
 -- created later, and writes every pane whose program reports status to
@@ -21,6 +22,11 @@ local PANEL_LABEL = scan.PANEL_LABEL
 local PANEL_COMMAND = rex.args.panel
 local PANEL_COLUMNS = tonumber(rex.args.columns) or 29
 local REX = rex.args.rex or "rex"
+local ORBIT_LABEL = "agents-orbit"
+-- rex do decodes a JSON value given as key=value, so orbit arrives as a table.
+local ORBIT_COMMAND = rex.args.orbit
+if type(ORBIT_COMMAND) == "string" then ORBIT_COMMAND = rex.json.decode(ORBIT_COMMAND) end
+local ORBIT_HEIGHT = math.min(math.max(tonumber(rex.args.orbit_height) or 0.3, 0.1), 0.9)
 local STATE_DIR = (os.getenv("XDG_CACHE_HOME") or (os.getenv("HOME") .. "/.cache")) .. "/rex-agents"
 local STATE = STATE_DIR .. "/state.json"
 
@@ -35,14 +41,15 @@ local REMOTE_RETRY = 30   -- seconds to leave out a host that failed to answer
 
 local dirty = true
 
-local function has_panel(window)
+local function has_block(window, label)
   for _, layer in ipairs(window.layers) do
     for _, b in ipairs(layer.blocks) do
-      if b.label == PANEL_LABEL then return true end
+      if b.label == label then return b end
     end
   end
-  return false
 end
+
+local function has_panel(window) return has_block(window, PANEL_LABEL) ~= nil end
 
 local function any_panel()
   for _, s in ipairs(scan.sessions(rex)) do
@@ -74,6 +81,30 @@ local function add_panel(sid, window)
       -- With the app's "balance splits on creation" on, the app overrides this
       -- ratio, and rex-agents corrects the width once it starts.
       local root = layer.layout.split and layer.layout.split.split_id or layer.layout.block_id
+      local layout = {
+        block = {
+          flavor  = "com.superlogical.terminal.shell",
+          label   = PANEL_LABEL,
+          options = { command = { PANEL_COMMAND, "--columns", tostring(PANEL_COLUMNS), "--state", STATE } },
+        },
+      }
+      if ORBIT_COMMAND then
+        -- rex-orbit's bots under the list, in the same column.
+        layout = {
+          split = {
+            direction = "vertical",
+            ratio     = 1 - ORBIT_HEIGHT,
+            before    = layout,
+            after     = {
+              block = {
+                flavor  = "com.superlogical.terminal.shell",
+                label   = ORBIT_LABEL,
+                options = { command = ORBIT_COMMAND },
+              },
+            },
+          },
+        }
+      end
       local _, err = rex.session.new_split{
         session_id = sid,
         anchor_id  = root,
@@ -81,13 +112,7 @@ local function add_panel(sid, window)
         side       = "after",
         ratio      = panel_ratio(sid, layer.layout),
         focus      = false,
-        layout     = {
-          block = {
-            flavor  = "com.superlogical.terminal.shell",
-            label   = PANEL_LABEL,
-            options = { command = { PANEL_COMMAND, "--columns", tostring(PANEL_COLUMNS), "--state", STATE } },
-          },
-        },
+        layout     = layout,
       }
       if err ~= nil then rex.log("warn", "agents panel: " .. tostring(err)) end
       return
@@ -168,8 +193,22 @@ rex.on("window_created", function(ctx, ev)
   end
 end)
 
+-- An orbit pane goes with its tab's panel, as when q closes the panel.
+local function close_lone_orbits()
+  for _, s in ipairs(scan.sessions(rex)) do
+    local view = rex.session.view{ session_id = s.session_id }
+    for _, w in ipairs(view and view.windows or {}) do
+      local orbit = has_block(w, ORBIT_LABEL)
+      if orbit and not has_panel(w) then
+        rex.call("block.close", { session_id = s.session_id, block_id = orbit.block_id })
+      end
+    end
+  end
+end
+
 rex.on("block_closed", function()
   mark()
+  close_lone_orbits()
   if not any_panel() then rex.stop() end
 end)
 

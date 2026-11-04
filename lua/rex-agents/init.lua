@@ -22,6 +22,7 @@ local COLLECTOR = ROOT .. "/lua/rex-agents/collect.lua"
 local WAITING = ROOT .. "/lua/rex-agents/waiting.lua"
 
 local PANEL_LABEL = "agents"
+local ORBIT_LABEL = "agents-orbit"
 local PICKER_LABEL = "agents-waiting"
 local SHELL = "com.superlogical.terminal.shell"
 
@@ -60,6 +61,21 @@ end
 
 local function rex_json(opts, argv)
   return rex.json.decode(run_rex(opts, argv))
+end
+
+-- The command for the rex-orbit pane: opts.orbit is the path to a clone of
+-- rex-orbit, run with node, or a full command.
+local function orbit_command(opts)
+  local orbit = opts.orbit
+  if type(orbit) == "table" then return orbit end
+  if type(orbit) ~= "string" then return nil end
+  local node = opts.node_bin
+  if not node then
+    for _, path in ipairs({ "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node" }) do
+      if exists(path) then node = path break end
+    end
+  end
+  return { node or "node", orbit .. "/bin/rex-orbit.mjs", "--fps", tostring(opts.orbit_fps or 12) }
 end
 
 local function has_session(list, session_id)
@@ -112,7 +128,7 @@ function M.setup(opts)
         for _, w in ipairs(view and view.windows or {}) do
           for _, layer in ipairs(w.layers) do
             for _, b in ipairs(layer.blocks) do
-              if b.label == PANEL_LABEL then
+              if b.label == PANEL_LABEL or b.label == ORBIT_LABEL then
                 panels[#panels + 1] = { session_id = s.session_id, block_id = b.block_id }
               end
             end
@@ -127,9 +143,13 @@ function M.setup(opts)
       end
 
       local rex_bin = find_rex(opts.rex_bin)
-      local _, err2 = rex.exec.start(
-        { rex_bin, "do", "--all", COLLECTOR, "panel=" .. PANEL_BIN, "columns=" .. columns, "rex=" .. rex_bin },
-        { detach = true, stdout = false, stderr = false })
+      local argv = { rex_bin, "do", "--all", COLLECTOR, "panel=" .. PANEL_BIN, "columns=" .. columns, "rex=" .. rex_bin }
+      local orbit = orbit_command(opts)
+      if orbit then
+        argv[#argv + 1] = "orbit=" .. rex.json.encode(orbit)
+        argv[#argv + 1] = "orbit_height=" .. (opts.orbit_height or 0.3)
+      end
+      local _, err2 = rex.exec.start(argv, { detach = true, stdout = false, stderr = false })
       if err2 ~= nil then error(err2, 0) end
     end,
   }
