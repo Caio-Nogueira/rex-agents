@@ -75,7 +75,8 @@ local function orbit_command(opts)
       if exists(path) then node = path break end
     end
   end
-  return { node or "node", orbit .. "/bin/rex-orbit.mjs", "--fps", tostring(opts.orbit_fps or 12) }
+  return { node or "node", orbit .. "/bin/rex-orbit.mjs", "--fps", tostring(opts.orbit_fps or 12),
+           "--theme", opts.orbit_theme or "dark" }
 end
 
 local function has_session(list, session_id)
@@ -120,14 +121,15 @@ function M.setup(opts)
         return
       end
 
+      -- Through the CLI: an action sees only the layouts of sessions it's
+      -- attached to, and a panel left in another session would keep the
+      -- collector running.
       local panels = {}
-      local list, err = rex.call("session.list")
-      if err ~= nil then error(err, 0) end
-      for _, s in ipairs(list.sessions) do
-        local view = rex.session.view{ session_id = s.session_id }
-        for _, w in ipairs(view and view.windows or {}) do
-          for _, layer in ipairs(w.layers) do
-            for _, b in ipairs(layer.blocks) do
+      for _, s in ipairs(rex_json(opts, { "ls", "--json" }).sessions or {}) do
+        local view = rex_json(opts, { "session", "inspect", s.session_id, "--json" })
+        for _, w in ipairs(view.windows or {}) do
+          for _, layer in ipairs(w.layers or {}) do
+            for _, b in ipairs(layer.blocks or {}) do
               if b.label == PANEL_LABEL or b.label == ORBIT_LABEL then
                 panels[#panels + 1] = { session_id = s.session_id, block_id = b.block_id }
               end
@@ -138,7 +140,7 @@ function M.setup(opts)
 
       if #panels > 0 then
         -- The collector exits on its own once the last panel is gone.
-        for _, p in ipairs(panels) do rex.call("block.close", p) end
+        for _, p in ipairs(panels) do pcall(run_rex, opts, { "block", "close", "-s", p.session_id, p.block_id }) end
         return
       end
 

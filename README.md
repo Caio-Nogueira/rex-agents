@@ -139,6 +139,7 @@ In the switcher, `Esc` closes it.
 | `orbit` | none | Path to a clone of [rex-orbit](https://github.com/benhid/rex-orbit), or a command as a list, to show its bots under the list. See [Orbit](#orbit). |
 | `orbit_height` | `0.3` | The orbit pane's share of the column's height. |
 | `orbit_fps` | `12` | rex-orbit's frame rate, when `orbit` is a path. |
+| `orbit_theme` | `dark` | rex-orbit's theme, when `orbit` is a path: `dark`, `light`, or `auto` to follow the terminal's background. |
 | `node_bin` | found automatically | Path to `node`, for `orbit`. |
 
 ## Orbit
