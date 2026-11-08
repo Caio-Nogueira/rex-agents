@@ -24,7 +24,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 ── usage ─────────────────
 ✻ 5h ▰▰▰▰▱▱▱▱▱▱  42% 2h      ← plan limits, with time to reset
   7d ▰▰▱▱▱▱▱▱▱▱  18% 4d
-  today 12.4M tok
+  today in 1.2M out 86.4k     ← tokens today
 ```
 
 ## Features
@@ -38,7 +38,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session, tab or host.
 - **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host. See [Remote hosts](#remote-hosts).
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
-- **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
+- **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's input and output tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
 
 Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code and Codex do this out of the box. A pane that runs `claude`, `codex`, `opencode` or `pi` but reports no status is still listed: Claude Code's state is read from its title (`✳` idle, a spinner while working), others show as idle. Such agents can't show as waiting.
@@ -280,6 +280,8 @@ Now the laptop's panel shows the mini's agents and sessions under `⇄ mini`, `c
 ## Usage section
 
 Today's tokens need no setup: they're read incrementally from Claude Code's logs (`~/.claude/projects`) and Codex's sessions (`~/.codex/sessions`). Codex's plan limits come from its session files too.
+
+`in` counts the input the model read fresh, including what was written to the prompt cache; `out` counts output, including Codex's reasoning. Cache reads are left out: every turn rereads the conversation so far from the cache, so they would dwarf the rest.
 
 Claude Code hands its plan limits only to its status line command, so for the Claude bars, save them from there. Add this at the start of your `statusLine` command in `~/.claude/settings.json`, after it reads its input into `$input`:
 
