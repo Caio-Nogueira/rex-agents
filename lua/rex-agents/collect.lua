@@ -35,6 +35,20 @@ if not PANEL_COMMAND then
   rex.stop(1)
 end
 
+-- One collector at a time: each one claims OWNER when it starts, and an
+-- older one that finds the claim taken exits. Otherwise every copy adds a
+-- panel to each new tab, and they take turns writing STATE.
+local OWNER = STATE_DIR .. "/collector.owner"
+local TOKEN = string.format("%d-%s-%.6f", os.time(), tostring({}):match("0x%x+") or "", os.clock())
+
+local function owner()
+  local f = io.open(OWNER, "r")
+  if not f then return nil end
+  local token = f:read("*l")
+  f:close()
+  return token
+end
+
 local REMOTE_EVERY = 3    -- seconds between polls of the remote hosts
 local REMOTE_TIMEOUT = 8  -- seconds a poll may take before it's stopped
 local REMOTE_RETRY = 30   -- seconds to leave out a host that failed to answer
@@ -187,6 +201,7 @@ end
 rex.on("session_destroyed", function(ctx, ev) scan.forget(nil, ev.session_id) end)
 
 rex.on("window_created", function(ctx, ev)
+  if owner() ~= TOKEN then return end -- a newer collector adds the panel
   local view = rex.session.view{ session_id = ctx.session_id }
   for _, w in ipairs(view and view.windows or {}) do
     if w.window_id == ev.window_id then add_panel(ctx.session_id, w) end
@@ -214,6 +229,11 @@ end)
 
 -- Coalesce bursts of events into at most one write per quarter second.
 rex.every(0.25, function()
+  if owner() ~= TOKEN then
+    rex.log("info", "rex-agents: a newer collector took over")
+    rex.stop()
+    return
+  end
   if not dirty then return end
   dirty = false
   write_state(snapshot())
@@ -225,6 +245,11 @@ rex.every(15, mark)
 rex.every(REMOTE_EVERY, poll_remotes)
 
 rex.exec({ "mkdir", "-p", STATE_DIR })
+do
+  local f = assert(io.open(OWNER, "w"))
+  f:write(TOKEN, "\n")
+  f:close()
+end
 poll_remotes()
 for _, s in ipairs(scan.sessions(rex)) do
   local view = rex.session.view{ session_id = s.session_id }
