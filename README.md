@@ -16,10 +16,9 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
     ⎇ feature/search-page ✓
 
 ── ⇄ studio ──────────────   ← a remote host
-4 ⏳ ✻ data-pipeline
+4 ⏳ ✻ data-pipeline         ← a remote agent
     etl
-5 ▫ data-pipeline            ← its sessions
-6 ▫ scratch
+5 ▫ scratch                  ← its sessions without agents
 
 ── usage ─────────────────
 ✻ 5h ▰▰▰▰▱▱▱▱▱▱  42% 2h      ← plan limits, with time to reset
@@ -36,7 +35,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Git branch and state** for each agent's directory: changed files `●N`, ahead `↑N`, behind `↓N`, or `✓` when clean.
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session, tab or host.
-- **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host. See [Remote hosts](#remote-hosts).
+- **Remote hosts too:** each of your other Rex servers (`rex hosts`) gets its own section below a divider, with its agents and its other sessions, or "unreachable" when it doesn't answer. Jumping to a row opens that host's session. Another key opens a new session on a remote host. See [Remote hosts](#remote-hosts).
 - **Go to the waiting agent:** one key jumps straight there when one agent is waiting, or opens a small floating switcher when several are.
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's input and output tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
@@ -176,7 +175,7 @@ rex hosts check
 
 The panel picks it up within a few seconds. Remove it with `rex hosts remove studio`.
 
-A host's section shows its agents first, then every session on it:
+A host's section shows its agents first, then its other sessions, the ones with no agent in them:
 
 ```
 ── ⇄ studio ──────────────
@@ -184,9 +183,7 @@ A host's section shows its agents first, then every session on it:
     needs approval: Bash: d…
 5 ⏳ ✻ etl-backfill
     Loading partitions…
-6 ▫ data-pipeline            ← studio's sessions, by name
-7 ▫ etl-backfill
-8 ▫ scratch
+6 ▫ scratch                  ← studio's other sessions, by name
 
 ── ⇄ mini ────────────────
   unreachable                ← didn't answer; tried again in 30s

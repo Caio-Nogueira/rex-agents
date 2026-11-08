@@ -170,9 +170,13 @@ def read_state():
     agents.sort(key=lambda r: (ORDER.get(r["state"], 9), agent_name(r), r["updated"]))
     rows = [r for r in agents if not r.get("server")]
     for host in hosts:
-        rows += [r for r in agents if r.get("server") == host["label"]]
+        host_agents = [r for r in agents if r.get("server") == host["label"]]
+        rows += host_agents
+        # A session with an agent is already listed by its agent's row.
+        with_agents = {r["session_id"] for r in host_agents}
         for session in sorted(host.get("sessions") or [], key=lambda r: r["session"]):
-            rows.append(dict(session, type="session", here=False))
+            if session["session_id"] not in with_agents:
+                rows.append(dict(session, type="session", here=False))
     return rows
 
 
