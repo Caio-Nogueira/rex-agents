@@ -31,7 +31,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **One row per agent, not per tab.** Two agents split side by side in one tab get two rows.
 - **Sorted by what needs you:** 🔴 waiting, ❌ failed, ✅ done, ⏳ working, 💤 idle.
 - **Waiting agents stand out** with a gold bar, why they're waiting ("needs approval", "has a question", "needs a login") and the agent's own message. The count shows at the top of the panel and in its pane title.
-- **Names from the agent:** Claude Code's `/rename` name (read from the terminal title), falling back to the Rex session name.
+- **Names from the agent:** Claude Code's `/rename` name or pi's `/name` (read from the terminal title), falling back to the Rex session name, or for pi to its project.
 - **Git branch and state** for each agent's directory: changed files `●N`, ahead `↑N`, behind `↓N`, or `✓` when clean.
 - **Follows you:** `▶` marks the agent in the focused pane, and the selection moves there when focus moves.
 - **Jump anywhere:** `1`–`9`, or `↑`/`↓` then `Enter`, focuses that agent's pane, in any session, tab or host.
@@ -40,7 +40,7 @@ A herdr-style agent list for [Rex](https://www.superlogical.com/rex). It puts a 
 - **Usage at the bottom:** plan limits (5-hour and weekly) as bars that turn yellow then red, and today's input and output tokens, for Claude Code and Codex. Read from the files those tools keep, like [ai-usage](https://github.com/trishtzy/ai-usage), with no API keys.
 - **Cheap:** one collector script listens to Rex events and writes the list to a file; each tab's panel only watches that file.
 
-Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code and Codex do this out of the box. A pane that runs `claude`, `codex`, `opencode` or `pi` but reports no status is still listed: Claude Code's state is read from its title (`✳` idle, a spinner while working), others show as idle. Such agents can't show as waiting.
+Agents appear when they report their status with Rex's [program status protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501). Claude Code, Codex and pi (1.1.0 or later) do this out of the box. Pi reports waiting only for its own dialogs and logins; it has no tool approvals. A pane that runs `claude`, `codex`, `opencode` or `pi` but reports no status is still listed: Claude Code's state is read from its title (`✳` idle, a spinner while working), others show as idle. Such agents can't show as waiting.
 
 ## Requirements
 

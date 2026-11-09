@@ -75,10 +75,22 @@ WAITING_DOT = ICON["blocked"]
 WAITING_LABEL = {"permission": "needs approval", "question": "has a question", "auth": "needs a login"}
 
 
+PI_TITLE_PREFIX = "π - "
+
+
+def pi_session_name(title):
+    rest = title[len(PI_TITLE_PREFIX):]
+    name, separator, project = rest.rpartition(" - ")
+    return (name if separator else project).strip()
+
+
 def agent_name(row):
     """The agent's conversation name from its terminal title (Claude's /rename
-    sets it), or the Rex session name when the title is just the program."""
+    and pi's /name set it), or the Rex session name when the title is just the
+    program. An unnamed pi session goes by its project, which pi's title ends with."""
     title = (row.get("title") or "").strip()
+    if row.get("app") == "pi" and title.startswith(PI_TITLE_PREFIX):
+        return pi_session_name(title) or row["session"]
     # Claude puts a status glyph (✳, or a braille spinner) in front of its title.
     head, _, rest = title.partition(" ")
     if rest and head and not any(c.isalnum() for c in head):
@@ -503,6 +515,10 @@ def usage_lines(width):
     return out
 
 
+def cwd_leaf(cwd):
+    return os.path.basename(cwd.rstrip("/")) or cwd
+
+
 def fit(text, width):
     """Keep the end of text, which for paths is the part that tells them apart."""
     if width <= 0:
@@ -562,7 +578,8 @@ def render(rows, cursor):
         # ▶ marks the agent you're in; you don't need a number to jump there.
         key = "▶" if row["here"] else key
         icon = ICON.get(row["state"], UNKNOWN_ICON)
-        name = agent_name(row)[: max(width - 7, 0)]  # "1 ⏳ ✻ " is 7 columns
+        full_name = agent_name(row)
+        name = full_name[: max(width - 7, 0)]  # "1 ⏳ ✻ " is 7 columns
         if waiting or selected:
             # A solid bar the width of the panel (one less, for the wide emoji).
             line = f"{key} {icon} {plain(agent_icon(row['app']))} {name}".ljust(width - 1)
@@ -576,11 +593,10 @@ def render(rows, cursor):
             if row["msg"]:
                 reason = f"{reason}: {row['msg']}"
             out.append(f"{WAITING_TEXT}    {reason[: max(width - 4, 0)]}\x1b[0m")
-        elif row["msg"]:
+        elif row["msg"] and row["msg"] != full_name:
             out.append(f"{DETAIL}    {row['msg'][: max(width - 4, 0)]}\x1b[0m")
-        elif row["cwd"]:
-            leaf = os.path.basename(row["cwd"].rstrip("/")) or row["cwd"]
-            out.append(f"{DETAIL}    {fit(leaf, width - 4)}\x1b[0m")
+        elif row["cwd"] and cwd_leaf(row["cwd"]) != full_name:
+            out.append(f"{DETAIL}    {fit(cwd_leaf(row['cwd']), width - 4)}\x1b[0m")
         if not row.get("server"):  # git can't see a remote host's files
             info = git_info(row["cwd"])
             if info:
