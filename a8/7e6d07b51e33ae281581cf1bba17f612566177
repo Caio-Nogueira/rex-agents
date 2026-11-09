@@ -1,0 +1,21 @@
+README.md
+  s_f7f793c3ec75f2::t_7b9b3bb93962cf 40,279,281
+bin/rex-agents
+  s_f7f793c3ec75f2::t_fe6ebe53337cb5 337-338,368-402,422-423,425-426,469-470,499-501,557-562
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "a87e6d07b51e33ae281581cf1bba17f612566177",
+  "prompts": {},
+  "sessions": {
+    "s_f7f793c3ec75f2": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a1c02f-f7f8-7732-8d0f-977322bbf223",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Caio Nogueira <caio@cloudflare.com>"
+    }
+  }
+}
