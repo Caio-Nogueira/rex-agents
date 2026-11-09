@@ -334,6 +334,8 @@ USAGE_LOCK = os.path.join(os.path.dirname(STATE), "usage.lock")
 CLAUDE_LIMITS = os.path.join(os.path.dirname(STATE), "claude-limits.json")
 CLAUDE_LOGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")
 CODEX_SESSIONS = os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "sessions")
+PI_SESSIONS = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR") or os.path.join(
+    os.environ.get("PI_CODING_AGENT_DIR") or "~/.pi/agent", "sessions"))
 
 
 def local_day(timestamp):
@@ -363,6 +365,41 @@ def read_new_lines(path, files):
     return data[:end].decode("utf-8", "ignore").splitlines()
 
 
+def epoch_ms_day(milliseconds):
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(milliseconds / 1000))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def read_pi_usage(cache, seen, today, midnight):
+    totals = cache["pi"]
+    for path in glob.glob(os.path.join(PI_SESSIONS, "*", "*.jsonl")):
+        try:
+            if os.path.getmtime(path) < midnight:
+                continue
+        except OSError:
+            continue
+        for line in read_new_lines(path, cache["files"]):
+            if '"usage"' not in line or '"assistant"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            message = entry.get("message") or {}
+            usage = message.get("usage") or {}
+            key = f"pi:{message.get('responseId') or entry.get('id')}:{message.get('timestamp')}"
+            if message.get("role") != "assistant" or not usage or key in seen:
+                continue
+            if epoch_ms_day(message.get("timestamp")) != today:
+                continue
+            seen.add(key)
+            totals["in"] += (usage.get("input") or 0) + (usage.get("cacheWrite") or 0)
+            totals["out"] += usage.get("output") or 0
+            totals["cost"] += (usage.get("cost") or {}).get("total") or 0
+
+
 def refresh_usage():
     """Reread today's usage into USAGE, if it's stale and no other panel is."""
     try:
@@ -382,9 +419,11 @@ def refresh_usage():
                 cache = json.load(f)
         except (OSError, ValueError):
             cache = {}
-        if cache.get("day") != today or not isinstance(cache.get("claude"), dict):  # dict: in and out apart
+        if (cache.get("day") != today or not isinstance(cache.get("claude"), dict)  # dict: in and out apart
+                or not isinstance(cache.get("pi"), dict)):
             cache = {"day": today, "files": {}, "seen": [], "claude": {"in": 0, "out": 0},
-                     "codex": {"in": 0, "out": 0}, "codex_limits": None}
+                     "codex": {"in": 0, "out": 0}, "pi": {"in": 0, "out": 0, "cost": 0.0},
+                     "codex_limits": None}
         seen = set(cache["seen"])
 
         midnight = time.mktime(time.strptime(today, "%Y-%m-%d"))
@@ -427,6 +466,8 @@ def refresh_usage():
                 if payload.get("rate_limits"):
                     cache["codex_limits"] = payload["rate_limits"]
 
+        read_pi_usage(cache, seen, today, midnight)
+
         cache["seen"] = sorted(seen)
         tmp = USAGE_CACHE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -454,6 +495,9 @@ def refresh_usage():
                 codex_limits.append({"label": label, "pct": w.get("used_percent", 0), "resets_at": w["resets_at"]})
         if any(cache["codex"].values()) or codex_limits:
             providers.append({"app": "codex", "limits": codex_limits, "tokens": cache["codex"]})
+
+        if any(cache["pi"].values()):
+            providers.append({"app": "pi", "limits": [], "tokens": cache["pi"]})
 
         tmp = USAGE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -510,8 +554,12 @@ def usage_lines(width):
         tokens = p.get("tokens") or {}
         if not isinstance(tokens, dict):  # usage.json from before in and out were apart
             tokens = {}
-        out.append(f"{icon if not limits else ' '} {DETAIL}today in {NAME}{short_count(tokens.get('in') or 0)}"
-                   f"{DETAIL} out {NAME}{short_count(tokens.get('out') or 0)}\x1b[0m")
+        tokens_in, tokens_out = short_count(tokens.get("in") or 0), short_count(tokens.get("out") or 0)
+        label = "today " if len(f"x today in {tokens_in} out {tokens_out}") <= width else ""
+        out.append(f"{icon if not limits else ' '} {DETAIL}{label}in {NAME}{tokens_in}"
+                   f"{DETAIL} out {NAME}{tokens_out}\x1b[0m")
+        if tokens.get("cost"):
+            out.append(f"  {DETAIL}cost today {NAME}${tokens['cost']:.2f}\x1b[0m")
     return out
 
 
